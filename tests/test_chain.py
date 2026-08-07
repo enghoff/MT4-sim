@@ -180,6 +180,29 @@ class GripperSpanModel(unittest.TestCase):
             (left + right) / MM, span_mm_for_s(GRIPPER_S_OPEN), places=9
         )
 
+    def test_stalled_drive_squeezes_instead_of_crushing(self):
+        from mt4_sim.chain import (
+            FINGER_SQUEEZE_MM,
+            finger_positions_for_s,
+            stalled_finger_targets,
+        )
+
+        # Host closed past contact (S=255 -> 0 mm); jaws stopped on a 20 mm cube.
+        commanded = finger_positions_for_s(255)
+        measured = (0.010, 0.010)
+        left, right = stalled_finger_targets(commanded, measured, (0.0, 0.0))
+        self.assertAlmostEqual(left, right, places=12)
+        self.assertAlmostEqual(left, 0.010 - FINGER_SQUEEZE_MM * MM, places=9)
+
+    def test_free_space_close_is_not_stalled(self):
+        from mt4_sim.chain import finger_positions_for_s, stalled_finger_targets
+
+        commanded = finger_positions_for_s(200)
+        # Tracking closely while still moving: follow the command.
+        measured = (commanded[0] + 0.0005, commanded[1] + 0.0005)
+        left, right = stalled_finger_targets(commanded, measured, (0.02, 0.02))
+        self.assertEqual((left, right), commanded)
+
 
 class UrdfIsWellFormed(unittest.TestCase):
     def setUp(self):

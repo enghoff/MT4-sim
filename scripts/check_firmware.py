@@ -44,12 +44,9 @@ from mt4_jog.kinematics import steps_from_angles  # noqa: E402
 # Where the picked cube should end up. Far enough from where it started that
 # nothing but a real pick could put it there.
 PLACE_OFFSET_MM = 70.0
-# This asks "did a pick actually happen", not "how accurate is the placement".
-# The cube lands about 12mm out, radially, and that is the gripper's doing, not
-# the protocol's: the calibration closes to S=255, which the jaw-span model puts
-# past zero opening, so the simulated fingers squeeze a 20mm cube that the real
-# servo would simply stall against. Tightening this number is a gripper-fidelity
-# job (a stall model on the finger drives), not a firmware one.
+# The cube lands about 12mm out, radially, when the jaws crush past contact.
+# Soft stalled finger drives (see mt4_sim.chain.stalled_finger_targets) are meant
+# to cut that; this tolerance still asks "did a pick happen", not placement mm.
 PLACE_TOLERANCE_MM = 25.0
 
 

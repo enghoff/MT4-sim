@@ -191,12 +191,54 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
     return (half, half)
 
 
+# Jaw drive: soft and force-capped so a close past contact stalls like the real
+# servo instead of winding a stiff spring into the cube. At these numbers a
+# 1.5 mm squeeze is about 0.9 N per finger -- enough friction to rotate an 8 g
+# cube into face alignment, not enough to punch it across the desk.
+FINGER_STIFFNESS_N_PER_M = 600.0
+FINGER_EFFORT_N = 2.5
+FINGER_SQUEEZE_MM = 1.5
+FINGER_STALL_ERR_MM = 2.0
+FINGER_STALL_VEL_M_S = 0.005
+
+
+def stalled_finger_targets(
+    commanded_m: tuple[float, float],
+    measured_m: tuple[float, float],
+    velocities_m_s: tuple[float, float],
+    *,
+    stall_err_m: float = FINGER_STALL_ERR_MM * MM,
+    stall_vel_m_s: float = FINGER_STALL_VEL_M_S,
+    squeeze_m: float = FINGER_SQUEEZE_MM * MM,
+) -> tuple[float, float]:
+    """Drive targets that stall against contact instead of crushing through it.
+
+    Firmware S still advances to the host's close command (open-loop, same as
+    the real board). The position drive must not: once the jaws are blocked and
+    nearly stopped, hold only a small squeeze past the measured opening so the
+    spring force stays in the "grip and rotate" regime.
+    """
+    half_cmd = 0.5 * (commanded_m[0] + commanded_m[1])
+    half_meas = 0.5 * (measured_m[0] + measured_m[1])
+    closing_blocked = half_cmd < half_meas - stall_err_m
+    nearly_stopped = max(abs(velocities_m_s[0]), abs(velocities_m_s[1])) < stall_vel_m_s
+    if closing_blocked and nearly_stopped:
+        half = max(half_cmd, half_meas - squeeze_m)
+        return (half, half)
+    return (commanded_m[0], commanded_m[1])
+
+
 __all__ = [
     "ARM_JOINT_NAMES",
     "CENCER_HEIGHT",
     "CENCER_OFFSET",
     "DESK_Z_MM",
+    "FINGER_EFFORT_N",
     "FINGER_JOINT_NAMES",
+    "FINGER_SQUEEZE_MM",
+    "FINGER_STALL_ERR_MM",
+    "FINGER_STALL_VEL_M_S",
+    "FINGER_STIFFNESS_N_PER_M",
     "GRIPPER_S_CLOSED",
     "GRIPPER_S_OPEN",
     "GROUND_Z_MM",
@@ -213,6 +255,7 @@ __all__ = [
     "park_pose",
     "s_for_span_mm",
     "span_mm_for_s",
+    "stalled_finger_targets",
     "urdf_from_model",
     "urdf_limits",
 ]

@@ -21,6 +21,7 @@ from xml.etree import ElementTree as ET
 from mt4_sim.chain import (
     CENCER_HEIGHT,
     CENCER_OFFSET,
+    FINGER_EFFORT_N,
     GRIPPER_S_OPEN,
     HEAD_HEIGHT,
     HEAD_OFFSET,
@@ -252,9 +253,9 @@ def build_urdf() -> ET.ElementTree:
         ET.SubElement(el, "origin", {"xyz": _mm3(joint.origin_mm), "rpy": "0 0 0"})
         ET.SubElement(el, "axis", {"xyz": " ".join(str(a) for a in joint.axis)})
         if joint.kind == "prismatic":
-            # Jaw force cap: a grasp squeezes, and 20N across a 20mm cube is
-            # firm without launching it.
-            lo, hi, eff, vel = 0.0, FINGER_TRAVEL_M, 20.0, 0.1
+            # Jaw force cap: enough to rotate an 8 g cube into face alignment,
+            # not enough to crush through it when the host closes past contact.
+            lo, hi, eff, vel = 0.0, FINGER_TRAVEL_M, FINGER_EFFORT_N, 0.1
         else:
             lo, hi = limits[joint.name]
             # Well above the ~1 Nm gravity torque at the shoulder, so the drive

@@ -12,7 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mt4_sim.chain import ARM_JOINT_NAMES, FINGER_JOINT_NAMES  # noqa: E402
+from mt4_sim.chain import (  # noqa: E402
+    ARM_JOINT_NAMES,
+    FINGER_JOINT_NAMES,
+    FINGER_STIFFNESS_N_PER_M,
+)
 from mt4_sim.paths import ARM_USD, ASSETS, URDF  # noqa: E402
 
 # A URDF says nothing about drive gains, and the converter leaves stiffness
@@ -40,9 +44,9 @@ from mt4_sim.paths import ARM_USD, ASSETS, URDF  # noqa: E402
 ARM_STIFFNESS = 12000.0
 
 # The jaws are the exception: a grasp holds by squeezing, so the finger drives
-# are deliberately soft and force-limited. N per metre, so 4000 N/m closing 1mm
-# past contact presses with about 4N.
-FINGER_STIFFNESS = 4000.0
+# are deliberately soft and force-limited. N per metre; matched to
+# ``mt4_sim.chain.FINGER_STIFFNESS_N_PER_M`` so a 1.5 mm squeeze is under 1 N.
+FINGER_STIFFNESS = FINGER_STIFFNESS_N_PER_M
 
 from isaacsim import SimulationApp  # noqa: E402
 

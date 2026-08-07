@@ -7,6 +7,7 @@ arm instead of the real one, with no change to any of them.
 
     python scripts/serve_firmware.py                     # headless, tcp 5570
     python scripts/serve_firmware.py --gui               # watch it move
+    python scripts/serve_firmware.py --camera            # also publish the scene camera
     python scripts/serve_firmware.py --listen COM21      # a com0com pair
 
 Then, from anywhere:
@@ -42,7 +43,24 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--render",
         action="store_true",
-        help="render every step even when headless (needed once a camera is served)",
+        help="render every step even when headless",
+    )
+    ap.add_argument(
+        "--camera",
+        action="store_true",
+        help="publish /World/SceneCamera frames on a shared-memory feed for "
+        "run_against_sim.py (implies paced rendering at --camera-hz)",
+    )
+    ap.add_argument(
+        "--camera-hz",
+        type=float,
+        default=15.0,
+        help="how often to render and publish the scene camera (default 15)",
+    )
+    ap.add_argument(
+        "--camera-name",
+        default="mt4_scene_cam",
+        help="shared-memory name for the camera feed",
     )
     ap.add_argument(
         "--home-seconds",
@@ -62,6 +80,10 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
+# SimulationApp forwards leftover sys.argv into Kit. Our flags (--camera,
+# --listen, …) are not Kit's; leaving them there makes the app exit as soon as
+# it finishes starting.
+sys.argv = [sys.argv[0]]
 
 from isaacsim import SimulationApp  # noqa: E402
 
@@ -70,7 +92,9 @@ app = SimulationApp({"headless": not args.gui, "renderer": "RaytracedLighting"})
 from isaacsim.core.api import World  # noqa: E402
 from isaacsim.core.utils.stage import open_stage  # noqa: E402
 
+from mt4_sim import rig  # noqa: E402
 from mt4_sim.arm import SimArm  # noqa: E402
+from mt4_sim.camera_feed import SceneCameraPublisher  # noqa: E402
 from mt4_sim.firmware import Mt4Machine, open_link  # noqa: E402
 from mt4_sim.chain import park_pose  # noqa: E402
 from mt4_jog.kinematics import steps_from_angles  # noqa: E402
@@ -87,6 +111,12 @@ def main() -> int:
 
     arm = SimArm()
     arm.park()
+    say = lambda text: print(text, flush=True)  # noqa: E731 - a server must not buffer
+    # Let the articulation settle before attaching the camera sensor -- the
+    # same order scripts/check.py uses -- so the first rendered frames are of
+    # a parked arm rather than a teleporting one.
+    for _ in range(30):
+        world.step(render=False)
 
     machine = Mt4Machine(
         arm,
@@ -95,9 +125,18 @@ def main() -> int:
     )
     link = open_link(args.listen)
 
+    feed: SceneCameraPublisher | None = None
+    if args.camera:
+        say("warming scene camera…")
+        feed = SceneCameraPublisher(
+            resolution=rig.CAM_RESOLUTION, shm_name=args.camera_name
+        )
+        feed.warm(world)
+        say(f"  first frame ok ({feed.resolution[0]}x{feed.resolution[1]})")
+
     dt = float(world.get_physics_dt())
-    render = args.gui or args.render
-    say = lambda text: print(text, flush=True)  # noqa: E731 - a server must not buffer
+    camera_period = 1.0 / max(args.camera_hz, 0.1)
+    camera_due = 0.0
     say(f"MT4 firmware substitute listening on {link.description}")
     say(
         f"  physics {1.0 / dt:.0f} Hz, "
@@ -107,6 +146,15 @@ def main() -> int:
         f"  point a client at it:  MT4_SIM_URL={link.description} "
         f"python scripts/run_against_sim.py -- <script>"
     )
+    if feed is not None:
+        say(
+            f"  scene camera on {feed.url} ({feed.resolution[0]}x{feed.resolution[1]} "
+            f"@ {args.camera_hz:g} Hz)"
+        )
+        say(
+            f"  point vision at it:  MT4_CAMERA_URL={feed.url} "
+            f"python scripts/run_against_sim.py -- <script>"
+        )
 
     started = time.monotonic()
     ticks = 0
@@ -148,7 +196,18 @@ def main() -> int:
                         )
                 link.send_all(async_lines)
 
+            camera_due += dt
+            publish_camera = feed is not None and camera_due >= camera_period
+            render = args.gui or args.render or publish_camera
             world.step(render=render)
+            if publish_camera:
+                # Annotator can still miss a frame under load; skip rather than die.
+                if feed.try_publish() is not None:
+                    camera_due = 0.0
+                # else: try again next tick without resetting the period clock
+                # past a small grace -- keep due so we retry soon.
+                elif camera_due > camera_period * 3:
+                    camera_due = 0.0
 
             ticks += 1
             if not args.free_run:
@@ -163,6 +222,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nstopping")
     finally:
+        if feed is not None:
+            feed.close()
         link.close()
     return 0
 

@@ -47,8 +47,9 @@ $env:PY = "Z:\IsaacSim\venv\Scripts\python.exe"
 & $env:PY scripts/run_sim.py --demo     # tour the desk: hover every tag and cube
 & $env:PY -m unittest discover -s tests # chain maths + firmware protocol, no GPU
 
-& $env:PY scripts/serve_firmware.py     # be the arm's firmware, on a socket
-& $env:PY scripts/check_firmware.py     # a control-repo pick, on a simulated cube
+& $env:PY scripts/serve_firmware.py --camera  # be the arm's firmware + scene camera
+& $env:PY scripts/check_firmware.py           # a control-repo pick, on a simulated cube
+& $env:PY scripts/run_against_sim.py --check-camera
 ```
 
 The control repo must be reachable. It defaults to the sibling `Z:\MT4`;
@@ -257,20 +258,23 @@ deletes tags left over from an earlier layout.
 
 | Path | What |
 |---|---|
-| `mt4_sim/chain.py` | model angles ↔ URDF joints, limits, gripper span, `DESK_Z_MM` |
+| `mt4_sim/chain.py` | model angles ↔ URDF joints, limits, gripper span / stall, `DESK_Z_MM` |
 | `mt4_sim/urdf.py` | the URDF: link shapes, masses, joint table |
 | `mt4_sim/calibration.py` | reads `vision_calibration.json` as scene geometry: table, tags, camera |
 | `mt4_sim/rig.py` | desk extent, colours, cubes — the layout the calibration has no opinion on |
 | `mt4_sim/scene.py` | builds the stage |
-| `mt4_sim/arm.py` | `SimArm`: drive by model angles, read TCP, solve the repo's IK |
+| `mt4_sim/arm.py` | `SimArm`: drive by model angles, soft stalled jaws, read TCP, solve the repo's IK |
+| `mt4_sim/camera_feed.py` | shared-memory publisher/reader for `/World/SceneCamera` frames |
+| `mt4_sim/sim_capture.py` | duck-typed `VideoCapture` / `FrameStream` over that feed |
 | `mt4_sim/markers.py` | renders the ArUco tag textures |
 | `mt4_sim/mt4_repo.py` | finds the control repo and puts it on `sys.path` |
 | `mt4_sim/firmware/` | the firmware's serial personality: `state`, `planner`, `machine`, `link` |
 | `scripts/` | `build_urdf` → `import_urdf` → `build_scene` → `check` / `run_sim` |
-| `scripts/serve_firmware.py` | the scene, answering the MT4 protocol on a socket |
-| `scripts/run_against_sim.py` | runs any control-repo script against that socket |
+| `scripts/serve_firmware.py` | the scene, answering the MT4 protocol on a socket (`--camera` publishes frames) |
+| `scripts/run_against_sim.py` | runs any control-repo script against that socket (and camera feed) |
 | `tests/test_chain.py` | chain maths against `mt4_jog.kinematics`, no GPU |
 | `tests/test_firmware.py` | the protocol, checked with the control repo's own client |
+| `tests/test_camera_feed.py` | shared-memory camera feed round-trip, no GPU |
 | `tools/step_assembly.py` | STEP assembly parser and bore-based kinematic audit |
 | `vendor/MT4-STL/` | WLKATA's official STL + STEP CAD (upstream clone) |
 | `assets/`, `out/` | generated USD and renders |
@@ -285,8 +289,9 @@ port that answers the way the firmware answers, so all of it drives the
 simulation with **no change to any of it**.
 
 ```powershell
-& $env:PY scripts/serve_firmware.py            # the arm, on a socket
+& $env:PY scripts/serve_firmware.py --camera   # the arm + scene camera
 & $env:PY scripts/run_against_sim.py --check   # what the client sees
+& $env:PY scripts/run_against_sim.py --check-camera
 & $env:PY scripts/run_against_sim.py -- Z:\MT4\jog.py   # any control-repo script
 & $env:PY scripts/demo_pick_place.py           # pickplace.pick/place, on a cube
 & $env:PY scripts/check_firmware.py            # does a real pick move a real cube?
@@ -294,7 +299,10 @@ simulation with **no change to any of it**.
 
 `serve_firmware.py` steps the scene, paced to the wall clock — the host is
 timing us, so a move that takes 4 s on the bench has to take 4 s here or every
-timeout in `Mt4Client` means something different.
+timeout in `Mt4Client` means something different. With `--camera` it also
+publishes `/World/SceneCamera` BGR frames on a shared-memory feed
+(`MT4_CAMERA_URL=shm://mt4_scene_cam`); `run_against_sim.py` sets that env var
+so `mt4_vision.camera` opens the feed itself.
 
 ### The counters are the truth, here as there
 
@@ -309,6 +317,7 @@ counters claim versus where the arm was actually left.
 | Faithful | How |
 |---|---|
 | Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; the gripper sweeps at the firmware's 120 S/s |
+| Grip force | Finger drives are soft (~600 N/m) and capped at ~2.5 N; once the jaws stall on an object they hold a 1.5 mm squeeze instead of winding shut to S=255, so a cube can rotate into face alignment without being crushed |
 | Path shape | `mp`/`mq` chop a straight world line into 2 mm segments and solve each with the control repo's own `ik_position`, routing tangent-arc-tangent around the 140 mm keep-out cylinder |
 | Rejections | `err not homed`, `err mp keepout`, `err mp ground z<115.0`, `err mp joints`, `err mq full 8`, `err mq station pose want … at …` — the exact strings the host greps for |
 | Queue semantics | `mq` cold-starts when idle and queues when not, a drained queue emits one `mp done`, `mp` mid-flight overrides and drops the queue, a grip station holds everything until the jaws finish |
@@ -351,20 +360,30 @@ of them drive the machine with a real `Mt4Client` over a real socket, including
 a queued pick-and-place path with a firmware grip station.
 `scripts/check_firmware.py` goes further and asks the world instead of the
 protocol — it runs `mt4_vision.pickplace.pick`/`place` unmodified and then looks
-at where the cube ended up on the stage. It lands 12 mm from the place target,
-and that residual is the gripper, not the protocol: the calibration closes to
-S=255, which the jaw-span model puts past zero opening, so the simulated fingers
-squeeze a 20 mm cube the real servo would just stall against.
+at where the cube ended up on the stage. Soft stalled finger drives keep a close
+past contact (live calib uses S=255) from crushing the cube the way a stiff
+position target to zero opening would.
 
+## The camera, replaced
+
+`mt4_vision.camera` opens a USB index through OpenCV, or a sim feed when
+`MT4_CAMERA_URL=shm://…` is set. `serve_firmware.py --camera` renders
+`/World/SceneCamera` and publishes BGR frames on that URL; `run_against_sim.py`
+sets the env var so `capture_scene`, the task scripts and the MCP tools see the
+simulated desk without monkey-patching. `scripts/check.py` already proved those
+frames decode the live ArUco set and read back through `vision_calibration.json`
+to within ~22 mm.
+
+```powershell
+& $env:PY scripts/serve_firmware.py --camera
+& $env:PY scripts/run_against_sim.py --check-camera
+& $env:PY scripts/run_against_sim.py -- Z:\MT4\stack_cubes.py --marker 2
+```
+
+Marker **4** sits under the camera-park pose and is refused; use 0–3. The scene
+only has four cubes, so a full nine-level stack will run out of pieces — start
+with ``--max-levels 4``.
 ## What this does not do
-
-**No camera.** This is the other half of the substitution and it is not built.
-`mt4_vision` opens a USB camera through OpenCV, so anything that *detects* — the
-task scripts, the calibration routines — still needs a real one. The scene
-camera is already rendered and already in the rig's own frame
-(`scripts/check.py` proves a tag decoded from it reads back through the live
-calibration to within 22 mm), so what is missing is the plumbing that serves
-those frames where `mt4_vision.camera` looks for them, not the frames.
 
 **No envelope guard below the firmware layer.** `SimArm.set_model_angles` checks
 the soft joint limits and nothing else. The ground-Z floor and keep-out cylinder

@@ -22,7 +22,9 @@ import numpy as np
 from mt4_sim.chain import (
     ARM_JOINT_NAMES,
     DESK_Z_MM,
+    FINGER_EFFORT_N,
     FINGER_JOINT_NAMES,
+    FINGER_STIFFNESS_N_PER_M,
     GRIPPER_S_CLOSED,
     GRIPPER_S_OPEN,
     JointAnglesDeg,
@@ -30,6 +32,7 @@ from mt4_sim.chain import (
     finger_positions_for_s,
     model_from_urdf,
     park_pose,
+    stalled_finger_targets,
     urdf_from_model,
 )
 from mt4_sim.urdf import JOINTS
@@ -84,6 +87,28 @@ class SimArm:
         self._finger_dofs = [names.index(n) for n in FINGER_JOINT_NAMES]
         self._gripper_s = float(GRIPPER_S_CLOSED)
         self._commanded: JointAnglesDeg | None = None
+        self._configure_finger_drives()
+
+    def _configure_finger_drives(self) -> None:
+        """Soften and force-cap the jaw drives so a stall does not crush.
+
+        The USD may still carry an older import's stiff fingers; rewriting the
+        drive here means a rebuilt scene is not required for the force limit to
+        take effect, only for the URDF effort attribute to match.
+        """
+        from pxr import UsdPhysics
+
+        stage = self._art.prim.GetStage()
+        for name in FINGER_JOINT_NAMES:
+            prim = stage.GetPrimAtPath(f"{ARM_PRIM_PATH}/Physics/{name}")
+            if not prim.IsValid():
+                raise RuntimeError(f"no finger joint prim at {prim.GetPath()}")
+            drive = UsdPhysics.DriveAPI.Get(prim, "linear")
+            if not drive:
+                raise RuntimeError(f"{name} has no linear drive")
+            drive.CreateStiffnessAttr(FINGER_STIFFNESS_N_PER_M)
+            drive.CreateDampingAttr(200.0)
+            drive.CreateMaxForceAttr(FINGER_EFFORT_N)
 
     # -- commanding -------------------------------------------------------
 
@@ -118,14 +143,38 @@ class SimArm:
         self._commanded = q
         self._drive(positions, self._arm_dofs)
 
+    def finger_positions(self) -> tuple[float, float]:
+        """Measured prismatic finger openings (m), chain order."""
+        positions = self._art.get_joint_positions(joint_indices=self._finger_dofs)
+        return (float(positions[0]), float(positions[1]))
+
+    def finger_velocities(self) -> tuple[float, float]:
+        velocities = self._art.get_joint_velocities(joint_indices=self._finger_dofs)
+        return (float(velocities[0]), float(velocities[1]))
+
     def set_gripper_s(self, s: float, *, teleport: bool = False) -> None:
-        """Command the gripper by firmware S value (120 open .. 285 closed)."""
+        """Command the gripper by firmware S value (120 open .. 285 closed).
+
+        Firmware S is open-loop and still goes to the host's close command. The
+        finger *drive* stalls against contact: once the jaws are blocked it
+        holds only a light squeeze, so a cube can rotate into alignment instead
+        of being crushed or ejected.
+        """
         if not GRIPPER_S_OPEN <= s <= GRIPPER_S_CLOSED:
             raise ValueError(f"gripper S must be {GRIPPER_S_OPEN}-{GRIPPER_S_CLOSED} (got {s})")
         self._gripper_s = float(s)
-        positions = np.asarray(finger_positions_for_s(s), dtype=float)
+        commanded = finger_positions_for_s(s)
         if teleport:
+            positions = np.asarray(commanded, dtype=float)
             self._art.set_joint_positions(positions, joint_indices=self._finger_dofs)
+            self._drive(positions, self._finger_dofs)
+            return
+        positions = np.asarray(
+            stalled_finger_targets(
+                commanded, self.finger_positions(), self.finger_velocities()
+            ),
+            dtype=float,
+        )
         self._drive(positions, self._finger_dofs)
 
     def move_to_tcp(self, x_mm: float, y_mm: float, z_mm: float, *, j4_deg: float | None = None):
