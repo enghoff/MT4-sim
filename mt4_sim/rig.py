@@ -125,11 +125,18 @@ CUBE_RGB = {
 # and reachable through a whole pick -- not just at table height but at the
 # +70mm the live stack transits at, where the annulus's inner edge jumps from
 # radius 104 out to about 134 and would otherwise strand a cube it can grip.
+# Nine cubes (three each of red, green, blue — the colours a nine-level
+# stack_cubes run needs); centres stay ≥45mm apart and clear of the five tags.
 CUBES: tuple[Cube, ...] = (
     Cube("red", 232.0, -95.0),
     Cube("green", 232.0, 95.0),
     Cube("blue", 135.0, -58.0, 25.0),
-    Cube("yellow", 133.0, 60.0, -15.0),
+    Cube("green", 133.0, 60.0, -15.0),
+    Cube("red", 265.0, -55.0, -10.0),
+    Cube("green", 265.0, 55.0, 10.0),
+    Cube("blue", 175.0, -90.0, -30.0),
+    Cube("red", 175.0, 90.0, 30.0),
+    Cube("blue", 145.0, 0.0, 20.0),
 )
 
 DESK_TOP_Z_MM = DESK_Z_MM

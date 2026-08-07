@@ -109,6 +109,12 @@ def main() -> int:
     world = World(stage_units_in_meters=1.0)
     world.reset()
 
+    from isaacsim.core.utils.stage import get_current_stage
+
+    from mt4_sim.scene import lock_scene_camera
+
+    lock_scene_camera(get_current_stage())
+
     arm = SimArm()
     arm.park()
     say = lambda text: print(text, flush=True)  # noqa: E731 - a server must not buffer

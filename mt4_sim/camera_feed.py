@@ -109,6 +109,16 @@ class SceneCameraPublisher:
 
         self._camera = Camera(prim_path=prim_path, resolution=self._resolution)
         self._camera.initialize()
+        # Existing scene USDs may predate the lock attribute; set it at runtime
+        # so a GUI orbit cannot move the calibrated lens without a rebuild.
+        try:
+            from isaacsim.core.utils.stage import get_current_stage
+
+            from mt4_sim.scene import lock_scene_camera
+
+            lock_scene_camera(get_current_stage(), prim_path)
+        except Exception:  # noqa: BLE001 - lock is best-effort; feed still works
+            pass
         self._warm_frames = warm_frames
         self._warmed = False
 

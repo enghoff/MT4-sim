@@ -286,7 +286,16 @@ def look_at(eye_m: Gf.Vec3d, target_m: Gf.Vec3d) -> Gf.Matrix4d:
     return Gf.Matrix4d().SetLookAt(eye_m, target_m, up).GetInverse()
 
 
-def define_camera(stage, path: str, eye_mm, target_mm, resolution, fov_deg: float):
+def define_camera(
+    stage,
+    path: str,
+    eye_mm,
+    target_mm,
+    resolution,
+    fov_deg: float,
+    *,
+    lock: bool = True,
+):
     camera = UsdGeom.Camera.Define(stage, path)
     width, height = resolution
     aperture = 24.0  # mm of sensor; focal length follows from the field of view
@@ -298,6 +307,13 @@ def define_camera(stage, path: str, eye_mm, target_mm, resolution, fov_deg: floa
     eye = Gf.Vec3d(*(v * MM for v in eye_mm))
     target = Gf.Vec3d(*(v * MM for v in target_mm))
     UsdGeom.Xformable(camera).AddTransformOp().Set(look_at(eye, target))
+    if lock:
+        # Kit's viewport camera manipulator honours this: without it, switching
+        # the GUI view to SceneCamera and orbiting would silently move the lens
+        # off the calibrated pose the vision feed depends on.
+        camera.GetPrim().CreateAttribute(
+            "omni:kit:cameraLock", Sdf.ValueTypeNames.Bool
+        ).Set(True)
     return camera
 
 
@@ -310,7 +326,23 @@ def add_scene_camera(stage) -> None:
         rig.CAM_TARGET_MM,
         rig.CAM_RESOLUTION,
         rig.CAM_HORIZONTAL_FOV_DEG,
+        lock=True,
     )
+
+
+def lock_scene_camera(stage, path: str = f"{WORLD}/SceneCamera") -> bool:
+    """Lock an already-authored scene camera so the GUI cannot move it.
+
+    Returns True when the prim existed and was locked (or already was).
+    """
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        return False
+    attr = prim.GetAttribute("omni:kit:cameraLock")
+    if not attr:
+        attr = prim.CreateAttribute("omni:kit:cameraLock", Sdf.ValueTypeNames.Bool)
+    attr.Set(True)
+    return True
 
 
 def add_arm(stage, arm_usd: Path) -> None:

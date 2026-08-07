@@ -28,7 +28,7 @@ from mt4_sim import mt4_repo  # noqa: F401  (sys.path bootstrap)
 from mt4_jog.joints import (
     GRIPPER_S_CLOSED,
     GRIPPER_S_OPEN,
-    GRIPPER_SWEEP_RATE_S_PER_S,
+    GRIPPER_SWEEP_RATE_S_PER_S as FIRMWARE_GRIPPER_SWEEP_RATE_S_PER_S,
     GROUND_Z_MM,
     J1_HOME_CENTER_STEPS,
     J2_HOME_PULLOFF_STEPS,
@@ -53,6 +53,12 @@ KEEPOUT_MARGIN_MM = 0.5
 CART_SEGMENT_MM = 2.0
 MAX_SEGMENTS = 250
 
+# The real servo finishes a close faster than the firmware's 120 S/s bookkeeping
+# suggests, so a host that lifts on grip-station settle leaves the simulated
+# jaws still closing. Run the sim sweep 50% faster so the fingers are on the
+# cube before the arm moves off.
+GRIPPER_SWEEP_RATE_S_PER_S = FIRMWARE_GRIPPER_SWEEP_RATE_S_PER_S * 1.5
+
 NUM_JOINTS = 4
 
 __all__ = [
@@ -60,6 +66,7 @@ __all__ = [
     "DEFAULT_SPEED_US",
     "GRIPPER_S_CLOSED",
     "GRIPPER_S_OPEN",
+    "GRIPPER_SWEEP_RATE_S_PER_S",
     "GROUND_Z_MM",
     "JOG_SPEED_MAX_US",
     "JOG_SPEED_MIN_US",

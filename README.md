@@ -316,7 +316,7 @@ counters claim versus where the arm was actually left.
 
 | Faithful | How |
 |---|---|
-| Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; the gripper sweeps at the firmware's 120 S/s |
+| Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; the gripper sweeps at 180 S/s (1.5× the firmware's 120) so simulated jaws finish before the arm lifts |
 | Grip force | Finger drives are soft (~600 N/m) and capped at ~2.5 N; once the jaws stall on an object they hold a 1.5 mm squeeze instead of winding shut to S=255, so a cube can rotate into face alignment without being crushed |
 | Path shape | `mp`/`mq` chop a straight world line into 2 mm segments and solve each with the control repo's own `ik_position`, routing tangent-arc-tangent around the 140 mm keep-out cylinder |
 | Rejections | `err not homed`, `err mp keepout`, `err mp ground z<115.0`, `err mp joints`, `err mq full 8`, `err mq station pose want … at …` — the exact strings the host greps for |

@@ -241,10 +241,10 @@ class TestGripper(unittest.TestCase):
         machine.handle_line("g 120")
         run_for(machine, 3.0)
         self.assertEqual(machine.handle_line("g c"), ["ok grip close"])
-        # 120 S/s over a 165-unit span is 1.375s.
-        run_for(machine, 1.0)
+        # Sim runs at 180 S/s (1.5x firmware); 165-unit span is 0.917s.
+        run_for(machine, 0.7)
         self.assertLess(machine.state.gripper.s, GRIPPER_S_CLOSED)
-        run_for(machine, 0.5)
+        run_for(machine, 0.4)
         self.assertAlmostEqual(machine.state.gripper.s, GRIPPER_S_CLOSED, delta=0.5)
         self.assertEqual(machine.handle_line("g c"), ["ok grip at closed"])
 
