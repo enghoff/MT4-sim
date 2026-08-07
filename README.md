@@ -23,7 +23,7 @@ and all five pass:
 | Position drives settle at the commanded pose | **≤ 0.04°** per joint |
 | The simulated camera's ArUco tags decode | **5 of 5**, via `cv2.aruco` DICT_4X4_50 |
 | Those tags, read back with the rig's own `vision_calibration.json` | **7–22 mm** and **≤ 3.6°** from where that file says they are taped |
-| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **4 of 4**, 2129–3326 px² blobs |
+| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **3 of 3** colours, 2901–4990 px² blobs |
 
 The last three matter more than they look: the simulated scene camera's frames
 go straight into the real `mt4_vision.detect` and the real `Calibration` with
@@ -87,75 +87,82 @@ way the simulated TCP can disagree with `fk_tcp` once the arm has settled, and
 tolerance — which is what makes the 0.0002 mm figure above a real statement
 about the chain.
 
-At the drive stiffness used (12000 N·m/rad) the tilt is under 0.1° and the TCP
-artefact under 0.06 mm. For scale, the real arm's measured backlash is 6–9 mm on
-small reversing moves.
+At the drive stiffness used (12000 N·m/rad) the tilt is under 0.18° and the TCP
+artefact under 0.11 mm. Both scale with the physics step — an implicit drive is
+effectively softer at a coarser one — so they were half that when the scene ran
+at 240 Hz and are what they are at the 60 Hz it runs at now. For scale, the real
+arm's measured backlash is 6–9 mm on small reversing moves.
 
 Modelling the rods properly needs a closed kinematic loop, which URDF cannot
-express and USD can. Worth doing only if something starts caring about 0.06 mm.
+express and USD can. Worth doing only if something starts caring about 0.1 mm.
 
 ## Frames: what z = 0 is, and where the desk sits
 
 The stage is authored in the arm's **home-angle frame**, the frame every
 coordinate in the MT4 stack lives in.
 
-**z = 0 is a modelling origin, not a surface.** It is the plane exactly 140 mm
-straight below the J2 shoulder pivot, on the J1 turning axis, inherited from the
-factory link geometry: `fk_tcp` builds TCP height as shoulder pivot 140, plus the
-two link contributions, minus 14.43 mm for the drop from the wrist pivot down to
-the gripper pads. Nothing physical sits at that plane and the gripper cannot be
-commanded to it — the lowest the pads reach inside the soft joint limits is
-z ≈ 37 mm.
+**z = 0 is both the modelling origin and the work surface.** It is the plane
+exactly 140 mm straight below the J2 shoulder pivot, on the J1 turning axis,
+inherited from the factory link geometry — and it is the plane the arm's own
+base stands on, so it is where the desk is. The MT4 sits *on* the desk.
 
-**The work surface is at z = 122 mm** — `Calibration.table_z`, read live out of
-the rig's own `vision_calibration.json` rather than restated here. It is both
-the table surface's robot-frame Z and the TCP Z that grips a cube sitting on it.
+**`Calibration.table_z` = 122 mm is not the desk.** It is a **TCP** height: the
+Z the arm is commanded to in order to grip something lying on the table,
+measured by touching the tags. The gripper's tongs hang below the TCP, and they
+are exactly long enough that their tips reach the wood when the TCP is at 122.
 
-So the shoulder pivot clears the work surface by **18 mm**, and everything
-below the shoulder is *under* the wood. That is not a modelling choice; it is
-what the rig's own numbers say, three times over:
+That one distinction is what makes three separate firmware numbers agree at
+once, where before only two could:
 
-- **The arm cannot reach a surface at its own foot.** The lowest the pads go
-  anywhere inside the soft joint limits is z ≈ 37, and out in the annulus where
-  the tags are it is z ≈ 100. A desk at z = 0 would be unreachable everywhere,
-  and no cube on it could ever be picked.
-- **`GROUND_Z_MM` = 115 exists because the limits let the arm go *below* the
-  surface.** A firmware floor a few mm under the table is only needed if the
-  table is inside the reachable volume, not beneath it.
-- **`calibrate_table_edge.py` measured the desk's back edge at x ≈ −76** — behind
-  the J1 axis, running through the base's own 140 mm footprint. The desk runs
-  *past* the arm; it does not stop in front of it.
+| | | |
+|---|---|---|
+| `CENCER_HEIGHT` | 140 | the shoulder pivot, 140 mm above the desk it stands on |
+| `Calibration.table_z` | 122 | the TCP height whose tong tips are on that desk |
+| `GROUND_Z_MM` | 115 | a floor 7 mm of tong-tip *below* the wood — which is what a floor "a few mm under the table" ought to mean |
 
-The sim therefore draws **one flat surface**, top at z = 122, spanning the
-measured back edge out to the frame edges, with a **bay** cut back from the rear
-edge for the arm. The bay is not decoration: the rotating column sweeps a 67 mm
-radius, and a tabletop through it is a static collider inside the articulation's
-swept volume, which jams the base yaw solid.
+and it is consistent with `calibrate_table_edge.py` measuring the desk's back
+edge at x ≈ −76, behind the J1 axis: the desk runs *past* the arm, because the
+arm is standing on it.
 
-### The one thing that does not add up
+The sim draws **one flat surface**, top at z = 0, spanning the measured back
+edge out to the frame edges, with a **bay** cut around the base's footprint. The
+bay is no longer load-bearing now that the arm stands on the wood rather than
+through it, but it keeps the tabletop from being a static collider coincident
+with the base's own foot.
 
-The CAD's `base_link` is **130 mm tall**, and the surface is 18 mm below the
-shoulder pivot — so the arm's base sits below the work surface, mounted at its
-back edge rather than standing on top of it. If the real rig has the MT4
-standing *on* the desk, then `CENCER_HEIGHT` = 140 and `Calibration.table_z` =
-122 cannot both be right, and it is `table_z` that would need re-measuring:
-120–122 is suspiciously close to `GROUND_Z_MM` = 115, and `docs/CALIBRATION.md`
-already warns that a touch which hit the guard clamp instead of the desk records
-right about there. Everything downstream of the table height — every pick, the
-whole vision map — is self-consistent either way, which is exactly why the
-disagreement can sit there unnoticed.
+Knobs: `calibration.desk_surface_z_mm()` (the wood), `chain.TCP_GRIP_Z_MM` (read
+from the calibration), `chain.TONG_REACH_MM` (the distance between them),
+`rig.DESK_FRONT_X_MM` / `rig.DESK_HALF_Y_MM` for how far the surface runs.
 
-Knobs: `chain.DESK_Z_MM` (read from the calibration), `rig.DESK_FRONT_X_MM` and
-`rig.DESK_HALF_Y_MM` for how far the surface runs, `rig.DESK_BAY_*` for the bay.
+### What the previous arrangement broke
 
-### The gripper really is that compact
+Reading `table_z` as the wood put the surface at z = 122 with the arm's base
+buried beneath it — and, because the gripper was then drawn with short jaws
+rising from the pads, it put the **gripper body's underside at exactly a 20 mm
+cube's top face** on every pick. The cube was pinned between the desk and the
+gripper while the jaws tried to turn it, which is why a misaligned cube could
+not be squared up: closing on one 20° off square turned it 1° and jammed on its
+corners at a 27 mm gap.
+
+With full-length tongs the same close turns it **20.0° of 20** and ends
+face-gripped at 19.6 mm. `check_grip.py --yaw-error` is the test.
+
+### The tongs are as long as the geometry requires
 
 `HEAD_HEIGHT` = 14.43 mm is the whole drop from the wrist pivot to the pads, so
-there is room for the jaws below the level plate and nothing else. The jaws are
-drawn rising from the pads rather than hanging below them — a cube on the desk is
-gripped with the TCP at table height, so a jaw reaching under the pads would be
-driven into the desk on every pick. The servo housing sits on top of the plate,
-which is where the room is.
+the head plate and the servo housing have to live above the TCP — but the tongs
+themselves hang the full `TONG_REACH_MM` below it, down to the wood. That is
+what lets the gripper reach a cube on the table without any part of the head
+touching it, and it is what real jaws that clear a tall object look like.
+
+Two consequences worth knowing:
+
+- **The tong tips sit on the wood at grip height.** They do not drag: a free
+  close there still reaches 0.01 mm.
+- **`GROUND_Z_MM` = 115 drives the tips 7 mm into the desk, and that jams the
+  jaws solid** — measured, they will not close at all. Faithful (the real jaws
+  would jam too), but it means a host that floors the Z and then grips gets
+  nothing.
 
 ## The CAD independently confirms the kinematics
 
@@ -216,8 +223,8 @@ recalibration on the real rig is one `build_scene.py` away from being true here.
   and the 44.3 mm black square are recovered from the pixel corners in
   `raw_marker_observations`, mapped onto the table through the same homography
   the live stack uses.
-- **Four cubes**, 20 mm, in the four colours the HSV detector knows, with grippy
-  friction because a grasp on this arm holds by friction alone. Placed where the
+- **Nine cubes**, 20 mm, in the colours the HSV detector knows, at plastic-on-wood
+  friction — see below, it is the number the gripper is most sensitive to. Placed where the
   reachable annulus, the camera's actual frame coverage and the tag positions all
   leave room — the real camera sees out to only x ≈ 270, far short of the arm's
   338 mm reach at table height.
@@ -225,6 +232,62 @@ recalibration on the real rig is one `build_scene.py` away from being true here.
   coloured face, and a red cube under a strong dome falls out of its own hue band
   while still looking obviously red to a human.
 - **Scene camera**, 1280×720, at the lens position the rig measured.
+
+### Two physics settings that do not do what they look like
+
+**Friction has to be *bound*, not applied.** `UsdPhysics.MaterialAPI` belongs on
+a `UsdShade.Material` prim that colliders reference with a `physics`-purpose
+material binding. Applied straight to the collider it writes attributes nothing
+reads — a cube carrying `physics:staticFriction = 1.1` that way slides down a
+45° ramp exactly as far as a cube with no material at all, which is how a whole
+scene can look grippy in USD and be frictionless in the solver.
+`arm.define_physics_material` / `bind_physics_material` are the pair that works,
+and `check_grip.py` verifies by following the binding rather than reading back
+the attribute it just wrote.
+
+**`PhysxSceneAPI.timeStepsPerSecond` does not set the step rate.**
+`isaacsim.core.api.World` takes its own `physics_dt` and ignores what the stage
+says, so the scene silently ran at whatever `World` defaulted to.
+`scene.physics_dt()` is the single source every entry point passes in, and
+`scene.PHYSICS_HZ` is the one place to change it.
+
+### Why the gripper can shove a cube square
+
+Three numbers decide whether closing jaws push a misaligned cube into line or
+just jam on its corners, and none of them is the grip force:
+
+- **Cube-on-desk friction.** The pair μ is what the cube has to overcome to
+  slide. At 0.5 and above it is welded to the table and the jaws stop dead on
+  its corners at a 27 mm gap; at 0.35 and below it slides and turns. Plastic on
+  wood is 0.2–0.4, so the physical value and the working value agree — the old
+  1.1 was rubber-on-rubber, chosen when the grip was weak and needed the help.
+- **Jaw armature** (`chain.FINGER_ARMATURE_KG`). A drive clipped at `maxForce`
+  has no damping left — the `c·v` term is clipped with it — so it becomes a
+  constant-force actuator that bounces off contact at `F·dt/m` per step. On a
+  20 g blade at 60 Hz that is 1.25 m/s, and the jaws chatter instead of pushing.
+  Armature is the servo's reflected rotor inertia, which is real and dominates
+  the blade's own mass; 0.30 kg makes the contact quiet enough to do work.
+- **Jaw speed** (`chain.FINGER_MAX_SPEED_M_S`). What squares a cube up is the
+  *momentum* of the closing jaw, not the static couple. Drop the ceiling to
+  0.12 m/s and a 20°-off cube stops squaring entirely.
+
+Measured on a cube 20° off square: it now turns 20.1° of 20 and ends
+face-gripped at 19.6 mm.
+
+**What is still wrong: the jaws are not coupled to each other.** The real
+gripper is one servo driving both blades through a symmetric linkage, so a cube
+it touches is centred between them. Here they are two independent prismatic
+drives, so whichever reaches the cube first walks it across the gripper — a
+grasp can finish with the cube 7–11 mm off the TCP, and one badly mis-aimed case
+in `check_grip.py`'s set finishes with the far jaw at its open stop and the cube
+merely leaning on it.
+
+`PhysxMimicJointAPI` is the right fix and is present in the schema, but this
+runtime applies it and then ignores it. The direct test: with the mimic applied,
+drive one jaw to 0 mm and the other to 24.5 mm and they go **exactly** there —
+0.00 / 24.50, the same as with no constraint at all. Software coupling is not a
+substitute: projecting the pair back onto L = R would drive the near jaw
+straight into the cube it is already touching.
 
 ### The camera *is* the rig's camera
 
@@ -263,7 +326,7 @@ deletes tags left over from an earlier layout.
 | `mt4_sim/calibration.py` | reads `vision_calibration.json` as scene geometry: table, tags, camera |
 | `mt4_sim/rig.py` | desk extent, colours, cubes — the layout the calibration has no opinion on |
 | `mt4_sim/scene.py` | builds the stage |
-| `mt4_sim/arm.py` | `SimArm`: drive by model angles, soft stalled jaws, read TCP, solve the repo's IK |
+| `mt4_sim/arm.py` | `SimArm`: drive by model angles, force-capped jaws, read TCP, solve the repo's IK |
 | `mt4_sim/camera_feed.py` | shared-memory publisher/reader for `/World/SceneCamera` frames |
 | `mt4_sim/sim_capture.py` | duck-typed `VideoCapture` / `FrameStream` over that feed |
 | `mt4_sim/markers.py` | renders the ArUco tag textures |
@@ -316,8 +379,8 @@ counters claim versus where the arm was actually left.
 
 | Faithful | How |
 |---|---|
-| Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; the gripper sweeps at 180 S/s (1.5× the firmware's 120) so simulated jaws finish before the arm lifts |
-| Grip force | Finger drives are soft (~600 N/m) and capped at ~2.5 N; once the jaws stall on an object they hold a 1.5 mm squeeze instead of winding shut to S=255, so a cube can rotate into face alignment without being crushed |
+| Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; gripper S advances at 360 S/s (finger targets) while grip stations still hold for the 180 S/s duration, so closes finish early and settle before the arm lifts |
+| Grip force | The jaws are a constant-force closer: a soft 1000 N/m spring commanded shut, capped at **1.5 N**, so a close past contact stalls at the cap the way the real servo does. That is 19× an 8 g cube's weight — enough to shove a misaligned cube square against the desk — and small enough not to launch it |
 | Path shape | `mp`/`mq` chop a straight world line into 2 mm segments and solve each with the control repo's own `ik_position`, routing tangent-arc-tangent around the 140 mm keep-out cylinder |
 | Rejections | `err not homed`, `err mp keepout`, `err mp ground z<115.0`, `err mp joints`, `err mq full 8`, `err mq station pose want … at …` — the exact strings the host greps for |
 | Queue semantics | `mq` cold-starts when idle and queues when not, a drained queue emits one `mp done`, `mp` mid-flight overrides and drops the queue, a grip station holds everything until the jaws finish |
@@ -360,9 +423,15 @@ of them drive the machine with a real `Mt4Client` over a real socket, including
 a queued pick-and-place path with a firmware grip station.
 `scripts/check_firmware.py` goes further and asks the world instead of the
 protocol — it runs `mt4_vision.pickplace.pick`/`place` unmodified and then looks
-at where the cube ended up on the stage. Soft stalled finger drives keep a close
-past contact (live calib uses S=255) from crushing the cube the way a stiff
-position target to zero opening would.
+at where the cube ended up on the stage. The force-capped finger drives keep a
+close past contact (live calib uses S=255) from crushing the cube the way a
+stiff position target to zero opening would.
+
+`scripts/check_grip.py` is the narrower test of the same thing, and it asserts
+against both failure directions at once: the jaws must end up symmetric and on
+the cube's faces, the cube must never exceed 0.15 m/s or wander 6 mm while they
+close, and it must ride the lift. Run it with `--yaw-error` to make the jaws
+earn their force by rotating a misaligned cube into line.
 
 ## The camera, replaced
 
@@ -381,8 +450,9 @@ to within ~22 mm.
 ```
 
 Marker **4** sits under the camera-park pose and is refused; use 0–3. The scene
-only has four cubes, so a full nine-level stack will run out of pieces — start
-with ``--max-levels 4``.
+stocks nine cubes, three each of red, green and blue, which is what a full
+nine-level `stack_cubes` run needs.
+
 ## What this does not do
 
 **No envelope guard below the firmware layer.** `SimArm.set_model_angles` checks

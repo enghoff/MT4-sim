@@ -53,17 +53,20 @@ KEEPOUT_MARGIN_MM = 0.5
 CART_SEGMENT_MM = 2.0
 MAX_SEGMENTS = 250
 
-# The real servo finishes a close faster than the firmware's 120 S/s bookkeeping
-# suggests, so a host that lifts on grip-station settle leaves the simulated
-# jaws still closing. Run the sim sweep 50% faster so the fingers are on the
-# cube before the arm moves off.
-GRIPPER_SWEEP_RATE_S_PER_S = FIRMWARE_GRIPPER_SWEEP_RATE_S_PER_S * 1.5
+# Jaw motion vs grip-station hold. The real servo finishes a close faster than
+# the firmware's 120 S/s bookkeeping, and the simulated fingers still lag the
+# counter. Advance S (finger targets) at 2x the previous sim rate so the jaws
+# are on the cube early, but keep ``settled`` paced at the previous rate so
+# grip stations hold the arm for the same wall time -- extra settle before lift.
+GRIPPER_HOLD_RATE_S_PER_S = FIRMWARE_GRIPPER_SWEEP_RATE_S_PER_S * 1.5  # 180
+GRIPPER_SWEEP_RATE_S_PER_S = GRIPPER_HOLD_RATE_S_PER_S * 2.0  # 360 motion
 
 NUM_JOINTS = 4
 
 __all__ = [
     "CART_SEGMENT_MM",
     "DEFAULT_SPEED_US",
+    "GRIPPER_HOLD_RATE_S_PER_S",
     "GRIPPER_S_CLOSED",
     "GRIPPER_S_OPEN",
     "GRIPPER_SWEEP_RATE_S_PER_S",
@@ -85,32 +88,46 @@ __all__ = [
 class Gripper:
     """The servo, as the firmware drives it.
 
-    ``s`` is what ``?`` reports: the value the firmware has commanded, which it
-    updates immediately on ``g <S>`` and advances at ``GRIPPER_SWEEP_RATE`` while
-    a ``g o``/``g c`` sweep runs. ``settled`` is the sim's own addition -- the
-    servo needs travel time, and a queued grip station waits on it.
+    ``s`` is what ``?`` reports and what the finger drives follow; it advances
+    at ``GRIPPER_SWEEP_RATE_S_PER_S``. ``settled`` also waits out a hold paced
+    at ``GRIPPER_HOLD_RATE_S_PER_S`` (half the motion rate), so a grip station
+    keeps the arm parked for the same wall time while the jaws finish early.
     """
 
     s: float = float(GRIPPER_S_CLOSED)
     target_s: float = float(GRIPPER_S_CLOSED)
     sweep: str = "stop"  # "stop" | "open" | "close"
+    hold_left_s: float = 0.0
 
     @property
     def settled(self) -> bool:
-        return self.sweep == "stop" and abs(self.s - self.target_s) < 0.5
+        return (
+            self.sweep == "stop"
+            and abs(self.s - self.target_s) < 0.5
+            and self.hold_left_s <= 0.0
+        )
+
+    def _arm_hold(self, from_s: float, to_s: float) -> None:
+        """Schedule the grip-station wait as if the jaws still moved at hold rate."""
+        self.hold_left_s = abs(to_s - from_s) / GRIPPER_HOLD_RATE_S_PER_S
 
     def command(self, s: float) -> None:
         """`g <S>`: stop any sweep and take the new value as commanded."""
         self.sweep = "stop"
-        self.target_s = float(min(GRIPPER_S_CLOSED, max(GRIPPER_S_OPEN, s)))
+        target = float(min(GRIPPER_S_CLOSED, max(GRIPPER_S_OPEN, s)))
+        self._arm_hold(self.s, target)
+        self.target_s = target
 
     def start_sweep(self, direction: str) -> None:
         self.sweep = direction
-        self.target_s = float(GRIPPER_S_OPEN if direction == "open" else GRIPPER_S_CLOSED)
+        target = float(GRIPPER_S_OPEN if direction == "open" else GRIPPER_S_CLOSED)
+        self._arm_hold(self.s, target)
+        self.target_s = target
 
     def stop_sweep(self) -> None:
         self.sweep = "stop"
         self.target_s = self.s
+        self.hold_left_s = 0.0
 
     def at_end(self, direction: str) -> bool:
         if direction == "open":
@@ -118,7 +135,7 @@ class Gripper:
         return self.s >= GRIPPER_S_CLOSED
 
     def tick(self, dt_s: float) -> None:
-        """Advance the servo toward its target at the firmware's sweep rate."""
+        """Advance S at the fast motion rate; count down the slower hold clock."""
         span = GRIPPER_SWEEP_RATE_S_PER_S * dt_s
         delta = self.target_s - self.s
         if abs(delta) <= span:
@@ -127,7 +144,8 @@ class Gripper:
                 self.sweep = "stop"
         else:
             self.s += span if delta > 0 else -span
-
+        if self.hold_left_s > 0.0:
+            self.hold_left_s = max(0.0, self.hold_left_s - dt_s)
 
 @dataclass
 class FirmwareState:

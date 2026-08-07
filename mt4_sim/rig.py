@@ -19,17 +19,14 @@ from mt4_sim.chain import DESK_Z_MM
 # The work surface
 # --------------------------------------------------------------------------
 
-# One flat surface, top at `DESK_Z_MM` -- `Calibration.table_z`, the plane the
-# arm touches and the tags are taped to. There is no second level: the arm is
-# mounted at the desk's back edge with its base below the surface, which is why
-# `calibrate_table_edge.py` measured that edge running past the arm's own
-# footprint rather than in front of it.
+# One flat surface, top at `DESK_Z_MM` = 0 -- the plane the arm's own base
+# stands on. The tags are taped to it and the gripper's tongs reach down to it;
+# `Calibration.table_z` = 122 is the *TCP* height that puts the tong tips here,
+# not the height of the wood. See `mt4_sim.chain` for why that reading is the
+# one that makes CENCER_HEIGHT, table_z and GROUND_Z_MM agree.
 #
-# The height is not a choice. The arm's shoulder pivot is 140mm above the frame
-# origin and the surface is 122mm above it, so the pivot clears the surface by
-# 18mm and everything below the shoulder is under the desk. That is what the
-# firmware's `GROUND_Z_MM` guard is for: the soft joint limits let the TCP be
-# driven to z = 37, well inside the tabletop.
+# The surface runs past the arm rather than stopping in front of it, which is
+# why `calibrate_table_edge.py` measured its back edge behind the J1 axis.
 DESK_THICKNESS_MM = 22.0
 
 # The one measured side of `table_polygon_robot`, margin removed: the line the

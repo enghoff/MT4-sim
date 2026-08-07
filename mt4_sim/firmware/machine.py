@@ -13,8 +13,9 @@ What it is faithful about:
   is driven to follow them.
 * **Timing.** A coordinated move takes one step period per master-axis step, so
   a leg takes as long here as it does on the bench, and ``speed <us>`` changes
-  it the same way. The gripper sweeps at 1.5x the firmware's 120 S/s so the
-  simulated jaws finish closing before the arm lifts.
+  it the same way. The gripper S (finger targets) advances at 360 S/s -- 2x
+  the previous sim rate -- while grip-station ``settled`` still waits as if
+  the jaws moved at 180 S/s, so the arm stays put long enough for the close.
 * **Validation and its wording.** Homing, gripper range, speed range, keep-out,
   ground plane, soft joint limits and the ``mq`` queue's capacity, station-pose
   and dwell checks all reject with the exact strings the host greps for.

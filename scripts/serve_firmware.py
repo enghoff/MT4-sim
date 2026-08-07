@@ -94,6 +94,7 @@ from isaacsim.core.utils.stage import open_stage  # noqa: E402
 
 from mt4_sim import rig  # noqa: E402
 from mt4_sim.arm import SimArm  # noqa: E402
+from mt4_sim.scene import physics_dt  # noqa: E402
 from mt4_sim.camera_feed import SceneCameraPublisher  # noqa: E402
 from mt4_sim.firmware import Mt4Machine, open_link  # noqa: E402
 from mt4_sim.chain import park_pose  # noqa: E402
@@ -106,13 +107,16 @@ def main() -> int:
         return 1
 
     open_stage(str(SCENE_USD))
-    world = World(stage_units_in_meters=1.0)
-    world.reset()
+    world = World(stage_units_in_meters=1.0, physics_dt=physics_dt())
 
     from isaacsim.core.utils.stage import get_current_stage
 
+    from mt4_sim.arm import prepare_gripper_contacts
     from mt4_sim.scene import lock_scene_camera
 
+    prepare_gripper_contacts(get_current_stage())
+    world.reset()
+    prepare_gripper_contacts(get_current_stage())
     lock_scene_camera(get_current_stage())
 
     arm = SimArm()

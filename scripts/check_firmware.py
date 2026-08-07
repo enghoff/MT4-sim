@@ -37,6 +37,7 @@ from pxr import UsdGeom  # noqa: E402
 
 from mt4_sim import rig  # noqa: E402
 from mt4_sim.arm import SimArm  # noqa: E402
+from mt4_sim.scene import physics_dt  # noqa: E402
 from mt4_sim.chain import park_pose  # noqa: E402
 from mt4_sim.firmware import Mt4Machine, TcpLineLink  # noqa: E402
 from mt4_jog.kinematics import steps_from_angles  # noqa: E402
@@ -44,9 +45,11 @@ from mt4_jog.kinematics import steps_from_angles  # noqa: E402
 # Where the picked cube should end up. Far enough from where it started that
 # nothing but a real pick could put it there.
 PLACE_OFFSET_MM = 70.0
-# The cube lands about 12mm out, radially, when the jaws crush past contact.
-# Soft stalled finger drives (see mt4_sim.chain.stalled_finger_targets) are meant
-# to cut that; this tolerance still asks "did a pick happen", not placement mm.
+# Jaws that crush past contact used to eject the cube and land it ~12mm out
+# radially. With the force-capped drives (see mt4_sim.chain, "The jaw drive")
+# the same pick now lands inside a millimetre. The tolerance stays loose on
+# purpose: this check asks "did a pick happen", and `check_grip.py` is where
+# placement accuracy is measured.
 PLACE_TOLERANCE_MM = 25.0
 
 
@@ -64,7 +67,7 @@ def main() -> int:
         return 1
 
     open_stage(str(SCENE_USD))
-    world = World(stage_units_in_meters=1.0)
+    world = World(stage_units_in_meters=1.0, physics_dt=physics_dt())
     world.reset()
 
     arm = SimArm()

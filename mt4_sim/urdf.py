@@ -21,13 +21,16 @@ from xml.etree import ElementTree as ET
 from mt4_sim.chain import (
     CENCER_HEIGHT,
     CENCER_OFFSET,
+    FINGER_DAMPING_N_S_PER_M,
     FINGER_EFFORT_N,
+    FINGER_MAX_SPEED_M_S,
     GRIPPER_S_OPEN,
     HEAD_HEIGHT,
     HEAD_OFFSET,
     LINKAGE1,
     LINKAGE2,
     MM,
+    TONG_REACH_MM,
     span_mm_for_s,
     urdf_limits,
 )
@@ -38,10 +41,23 @@ FINGER_TRAVEL_M = 0.5 * span_mm_for_s(GRIPPER_S_OPEN) * MM
 
 FINGER_LENGTH_MM = 26.0
 FINGER_THICK_MM = 10.0
-# The pads sit at the TCP and the jaws rise from there. A cube on the desk is
-# gripped with the TCP at table height, so a jaw reaching *below* the pads would
-# be driven into the desk on every pick.
-FINGER_HEIGHT_MM = 12.0
+# The tongs hang from the TCP down to the wood, which is what ``TONG_REACH_MM``
+# measures. That is the real gripper's proportions: long blades, so the servo
+# housing and the head plate ride well clear of whatever is being picked. The
+# short jaws this replaces put the gripper body's underside exactly on a 20 mm
+# cube's top face, pinning the cube against the desk while the jaws tried to
+# turn it.
+FINGER_ABOVE_TCP_MM = 12.0
+FINGER_BELOW_TCP_MM = TONG_REACH_MM
+FINGER_HEIGHT_MM = FINGER_ABOVE_TCP_MM + FINGER_BELOW_TCP_MM
+# Centre of the blade in the gripper frame: the span -BELOW .. +ABOVE.
+FINGER_CENTRE_Z_MM = (FINGER_ABOVE_TCP_MM - FINGER_BELOW_TCP_MM) / 2.0
+# The prismatic joint sits on the *inner* face of each blade -- the face the
+# span model measures between. ``finger_positions_for_s`` is half the clear
+# opening, so the box must be offset outward by half its thickness; centering
+# it on the joint ate 10mm of opening and left a 20mm cube barely fitting at
+# the calibrated open S.
+FINGER_INNER_TO_CENTER_MM = FINGER_THICK_MM / 2.0
 
 
 @dataclass(frozen=True)
@@ -100,13 +116,10 @@ def _lumped_inertia(link: Link) -> tuple[tuple[float, float, float], float, tupl
 
 # The static base is the arm's own column, drawn at the height the CAD gives it:
 # 140mm from its foot up to the shoulder pivot, which puts the foot on the
-# modelling plane at z = 0. `base_link`'s frame *is* that plane.
-#
-# Nothing about this is tied to the desk. The desk surface is 120mm up, so the
-# column passes through that height -- which is why `mt4_sim.rig` keeps the desk
-# clear of the base's footprint instead of running it underneath. A tabletop
-# through the column would be a static collider inside the articulation's
-# swept volume, and the base yaw would jam solid against it.
+# modelling plane at z = 0. `base_link`'s frame *is* that plane -- and that plane
+# is the desk, because the arm stands on it. `mt4_sim.rig` still cuts the wood
+# back around the footprint so the tabletop is not a static collider coincident
+# with the foot.
 _BASE_TOP_MM = 76.0
 _FOOT_H = 8.0
 
@@ -149,15 +162,28 @@ LINKS: tuple[Link, ...] = (
     # that only 14.43mm under the wrist pivot, so the jaws are all there is room
     # for below the plate and the servo housing sits on top of it.
     Link("gripper_base", 0.12, (Box((38.0, 32.0, 20.0), (0.0, 0.0, 30.0)),)),
+    # Nominal, like every other mass here, but scaled for a blade this long.
     Link(
         "finger_left",
-        0.02,
-        (Box((FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM), (0.0, 0.0, 6.0)),),
+        0.06,
+        # +Y is outward; origin is the inner (pad) face, box grows outward.
+        (
+            Box(
+                (FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
+                (0.0, FINGER_INNER_TO_CENTER_MM, FINGER_CENTRE_Z_MM),
+            ),
+        ),
     ),
     Link(
         "finger_right",
-        0.02,
-        (Box((FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM), (0.0, 0.0, 6.0)),),
+        0.06,
+        # -Y is outward on this side (joint axis is (0,-1,0)).
+        (
+            Box(
+                (FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
+                (0.0, -FINGER_INNER_TO_CENTER_MM, FINGER_CENTRE_Z_MM),
+            ),
+        ),
     ),
 )
 
@@ -255,7 +281,9 @@ def build_urdf() -> ET.ElementTree:
         if joint.kind == "prismatic":
             # Jaw force cap: enough to rotate an 8 g cube into face alignment,
             # not enough to crush through it when the host closes past contact.
-            lo, hi, eff, vel = 0.0, FINGER_TRAVEL_M, FINGER_EFFORT_N, 0.1
+            # The velocity ceiling is load-bearing -- see FINGER_MAX_SPEED_M_S
+            # for why a slow jaw stops squaring misaligned cubes up.
+            lo, hi, eff, vel = 0.0, FINGER_TRAVEL_M, FINGER_EFFORT_N, FINGER_MAX_SPEED_M_S
         else:
             lo, hi = limits[joint.name]
             # Well above the ~1 Nm gravity torque at the shoulder, so the drive
@@ -271,7 +299,7 @@ def build_urdf() -> ET.ElementTree:
         # URDF value. These are the numbers that land in USD verbatim (N.m.s per
         # degree for revolute, N.s/m for prismatic) and both are well past
         # critical, so a stiff position drive settles without ringing.
-        damping = "200.0" if joint.kind == "prismatic" else "4.0"
+        damping = str(FINGER_DAMPING_N_S_PER_M) if joint.kind == "prismatic" else "4.0"
         ET.SubElement(el, "dynamics", {"damping": damping, "friction": "0.0"})
 
     return ET.ElementTree(robot)

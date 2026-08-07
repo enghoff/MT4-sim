@@ -35,18 +35,19 @@ from isaacsim.core.utils.stage import open_stage  # noqa: E402
 
 from mt4_sim import rig  # noqa: E402
 from mt4_sim.arm import SimArm  # noqa: E402
-from mt4_sim.chain import DESK_Z_MM, GRIPPER_S_CLOSED, GRIPPER_S_OPEN  # noqa: E402
+from mt4_sim.scene import physics_dt  # noqa: E402
+from mt4_sim.chain import TCP_GRIP_Z_MM, GRIPPER_S_CLOSED, GRIPPER_S_OPEN  # noqa: E402
 
 STEP_HZ = 60.0
 # Above the desk by the same clearance the real stack transits at.
-TRANSIT_Z_MM = DESK_Z_MM + 70.0
+TRANSIT_Z_MM = TCP_GRIP_Z_MM + 70.0
 
 
 def demo_waypoints():
     """Hover each marker, then each cube, opening and closing the jaws."""
     for marker in rig.MARKERS:
         yield (marker.x_mm, marker.y_mm, TRANSIT_Z_MM, GRIPPER_S_OPEN)
-        yield (marker.x_mm, marker.y_mm, DESK_Z_MM + 25.0, GRIPPER_S_CLOSED)
+        yield (marker.x_mm, marker.y_mm, TCP_GRIP_Z_MM + 25.0, GRIPPER_S_CLOSED)
         yield (marker.x_mm, marker.y_mm, TRANSIT_Z_MM, GRIPPER_S_CLOSED)
     for cube in rig.CUBES:
         yield (cube.x_mm, cube.y_mm, TRANSIT_Z_MM, GRIPPER_S_OPEN)
@@ -58,7 +59,7 @@ def main() -> int:
         return 1
 
     open_stage(str(SCENE_USD))
-    world = World(stage_units_in_meters=1.0)
+    world = World(stage_units_in_meters=1.0, physics_dt=physics_dt())
     world.reset()
 
     from isaacsim.core.utils.stage import get_current_stage

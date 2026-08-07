@@ -66,13 +66,26 @@ from mt4_jog.kinematics import (
 
 MM = 0.001
 
-# Desk surface in the arm's home-angle frame, read from the live rig's
-# calibration rather than restated: `Calibration.table_z` is both the table
-# surface's Z and the TCP Z that grips a cube sitting on it, measured by
-# touching the tags with the TCP. `mt4_jog.joints.GROUND_Z_MM` (115) is the
-# firmware's soft floor, deliberately a few mm under the surface so a pick at
-# table_z presses into the desk instead of stopping short of it.
-DESK_Z_MM = calibration.table_z_mm()
+# `Calibration.table_z` (122) is a **TCP** height: the Z the arm is commanded to
+# in order to grip something lying on the table, measured by touching the tags.
+# It is not where the wood is. The gripper's tongs hang below the TCP, and they
+# are long enough that the surface they reach is the plane the arm's own base
+# stands on -- so the MT4 sits on the desk, which is the only arrangement in
+# which all three of the firmware's numbers make sense at once:
+#
+#   CENCER_HEIGHT = 140    the shoulder pivot, 140 mm above the desk it stands on
+#   table_z       = 122    the TCP height whose tong tips are on that desk
+#   GROUND_Z_MM   = 115    a floor 7 mm of tong-tip *below* the wood, which is
+#                          what a floor "a few mm under the table" should be
+#
+# The alternative -- wood at z = 122 with the arm's base buried beneath it --
+# is what this modelled before, and it put the gripper body exactly on a 20 mm
+# cube's top face on every pick.
+TCP_GRIP_Z_MM = calibration.table_z_mm()
+DESK_Z_MM = calibration.desk_surface_z_mm()
+# How far the tongs reach below the TCP. Not a free parameter: it is the whole
+# distance between the two planes above.
+TONG_REACH_MM = TCP_GRIP_Z_MM - DESK_Z_MM
 
 # Jaw span model from `mt4_vision.calib` (grip_span_s_at_zero_mm /
 # grip_span_s_per_mm, measured on the real gripper): span_mm = (212.3 - S) /
@@ -186,46 +199,93 @@ def s_for_span_mm(span_mm: float) -> float:
 
 
 def finger_positions_for_s(s: float) -> tuple[float, float]:
-    """Gripper S -> the two prismatic finger positions (m), each half the span."""
+    """Gripper S -> prismatic positions (m): half the *clear* opening each side.
+
+    Joint origin is the inner face of each blade (see ``mt4_sim.urdf``), matching
+    the live span calibration which measures face-to-face gap, not centre-to-centre.
+    """
     half = 0.5 * span_mm_for_s(s) * MM
     return (half, half)
 
 
-# Jaw drive: soft and force-capped so a close past contact stalls like the real
-# servo instead of winding a stiff spring into the cube. At these numbers a
-# 1.5 mm squeeze is about 0.9 N per finger -- enough friction to rotate an 8 g
-# cube into face alignment, not enough to punch it across the desk.
-FINGER_STIFFNESS_N_PER_M = 600.0
-FINGER_EFFORT_N = 2.5
-FINGER_SQUEEZE_MM = 1.5
-FINGER_STALL_ERR_MM = 2.0
-FINGER_STALL_VEL_M_S = 0.005
+# --------------------------------------------------------------------------
+# The jaw drive
+# --------------------------------------------------------------------------
+#
+# The jaws are a **constant-force closer**: a soft spring commanded shut, with
+# the force cap doing the gripping. The host closes past contact (S=255 is a
+# negative span), so the drive's position error is always large and the force
+# is always the cap -- ``FINGER_EFFORT_N`` *is* the grip force, whatever the
+# object's width. That is also the better model of the real servo, which
+# stalls against the object and holds.
+#
+# The force is sized from the task, not from "as hard as the solver allows".
+# A 20 mm cube is 8 g, so its weight is 0.078 N and:
+#
+#   hold it against gravity   N >= mg / (2 mu) = 0.078 / 2.2  = 0.036 N
+#   rotate a yawed one flat   N >= desk friction moment / arm = 0.02 N
+#   lift it on a moving arm   the above with a 10x margin     ~ 0.4 N
+#
+# 1.5 N is ~19x the cube's weight and ~40x the static hold requirement, which
+# is margin enough for the arm to fling it around at the accelerations a
+# position drive produces. Going higher buys nothing and costs stability: the
+# velocity a capped drive can inject into a 20 g finger in one substep is
+# ``F * dt / m``, which at 240 Hz is 0.31 m/s here and was **2.5 m/s** at the
+# 12 N cap this replaces. Delivered through a finger into an 8 g cube, that
+# impulse is what threw cubes across the desk.
+#
+# Stiffness and damping only shape the approach, not the grip force. Critical
+# damping is 2*sqrt(k*m) = 2*sqrt(1000 * 0.02) = 8.94, so 12.0 is zeta = 1.34:
+# the jaw settles without ringing, and its terminal closing speed under the
+# cap is F/c = 0.125 m/s, comfortably faster than the firmware's own 360 S/s
+# sweep moves the target (~0.096 m/s per jaw).
+FINGER_STIFFNESS_N_PER_M = 1000.0
+FINGER_EFFORT_N = 1.5
+FINGER_DAMPING_N_S_PER_M = 12.0  # zeta = 1.34 at m = 0.02 kg (critical = 8.94)
 
+# Armature: extra inertia in *joint* space, and the thing that makes the above
+# usable at 60 Hz.
+#
+# A drive clipped at ``maxForce`` has no damping left -- the ``c * v`` term is
+# clipped away with the rest -- so in sustained contact it stops being a spring
+# and becomes a constant-force actuator with nothing opposing velocity. It then
+# bounces off the contact at ``F * dt / m`` per step: 1.25 m/s for a 20 g finger
+# at 1.5 N and 60 Hz. Measured, the jaws chattered over ~0.8 mm and the cube's
+# angular velocity swung +/-280 deg/s about zero, so the couple that should have
+# squared the cube up averaged out to nothing.
+#
+# This is not a fudge factor. The blade is driven through a geared servo, and a
+# gearbox reflects the rotor's inertia to the output by the square of its ratio,
+# so the mass the drive actually has to accelerate is far more than the blade's
+# own 20 g. Modelling that is what makes the contact quiet, and it is also what
+# lets the jaws do useful work on a misaligned cube -- measured on a cube 20 deg
+# off square, closing at 60 Hz:
+#
+#     0.02 kg   jaws jitter, cube turns  1.2 of 20 deg, jams on corners at 27.0
+#     0.30 kg   quiet contact, cube turns 20.1 of 20 deg, face grip at 19.6
+#     1.00 kg   as above, but the cube ends further off the jaws' centre
+#
+# Too light and the jaws rattle against the cube without ever pushing it; the
+# couple that should square it up averages to nothing over the bounce.
+FINGER_ARMATURE_KG = 0.30
 
-def stalled_finger_targets(
-    commanded_m: tuple[float, float],
-    measured_m: tuple[float, float],
-    velocities_m_s: tuple[float, float],
-    *,
-    stall_err_m: float = FINGER_STALL_ERR_MM * MM,
-    stall_vel_m_s: float = FINGER_STALL_VEL_M_S,
-    squeeze_m: float = FINGER_SQUEEZE_MM * MM,
-) -> tuple[float, float]:
-    """Drive targets that stall against contact instead of crushing through it.
+# How fast a jaw may travel. The firmware's own 360 S/s sweep moves each jaw at
+# ~0.096 m/s, so this only has to clear that; 0.15 leaves half again in hand
+# without the jaws slamming shut like a trap.
+#
+# It used to have to be 0.5. With the short jaws the gripper body's underside
+# rested on the cube, and the only thing that could turn a misaligned one was
+# the *momentum* of a fast-closing blade -- at 0.12 m/s a cube 20 deg off square
+# turned 0.9 deg and stayed jammed on its corners. Full-length tongs turn it
+# with a static couple instead, so the speed stopped mattering: 20.0 deg of 20
+# at 0.5 m/s, 19.9 at 0.1.
+FINGER_MAX_SPEED_M_S = 0.15
 
-    Firmware S still advances to the host's close command (open-loop, same as
-    the real board). The position drive must not: once the jaws are blocked and
-    nearly stopped, hold only a small squeeze past the measured opening so the
-    spring force stays in the "grip and rotate" regime.
-    """
-    half_cmd = 0.5 * (commanded_m[0] + commanded_m[1])
-    half_meas = 0.5 * (measured_m[0] + measured_m[1])
-    closing_blocked = half_cmd < half_meas - stall_err_m
-    nearly_stopped = max(abs(velocities_m_s[0]), abs(velocities_m_s[1])) < stall_vel_m_s
-    if closing_blocked and nearly_stopped:
-        half = max(half_cmd, half_meas - squeeze_m)
-        return (half, half)
-    return (commanded_m[0], commanded_m[1])
+# Pad / cube contact. Rubber pads on a plastic cube; the grip holds by friction
+# alone, and at 1.5 N even mu = 0.03 would carry the cube's weight, so this is
+# not a number the grip is sensitive to.
+FINGER_STATIC_FRICTION = 1.2
+FINGER_DYNAMIC_FRICTION = 1.1
 
 
 __all__ = [
@@ -233,11 +293,15 @@ __all__ = [
     "CENCER_HEIGHT",
     "CENCER_OFFSET",
     "DESK_Z_MM",
+    "TCP_GRIP_Z_MM",
+    "TONG_REACH_MM",
+    "FINGER_ARMATURE_KG",
+    "FINGER_DAMPING_N_S_PER_M",
+    "FINGER_DYNAMIC_FRICTION",
     "FINGER_EFFORT_N",
     "FINGER_JOINT_NAMES",
-    "FINGER_SQUEEZE_MM",
-    "FINGER_STALL_ERR_MM",
-    "FINGER_STALL_VEL_M_S",
+    "FINGER_MAX_SPEED_M_S",
+    "FINGER_STATIC_FRICTION",
     "FINGER_STIFFNESS_N_PER_M",
     "GRIPPER_S_CLOSED",
     "GRIPPER_S_OPEN",
@@ -255,7 +319,6 @@ __all__ = [
     "park_pose",
     "s_for_span_mm",
     "span_mm_for_s",
-    "stalled_finger_targets",
     "urdf_from_model",
     "urdf_limits",
 ]

@@ -180,28 +180,89 @@ class GripperSpanModel(unittest.TestCase):
             (left + right) / MM, span_mm_for_s(GRIPPER_S_OPEN), places=9
         )
 
-    def test_stalled_drive_squeezes_instead_of_crushing(self):
+    def test_finger_boxes_put_the_inner_face_on_the_joint(self):
+        """Clear opening must equal the span model, not span minus blade thickness."""
+        from mt4_sim.urdf import FINGER_INNER_TO_CENTER_MM, FINGER_THICK_MM, LINKS
+
+        by_name = {link.name: link for link in LINKS}
+        left = by_name["finger_left"].shapes[0]
+        right = by_name["finger_right"].shapes[0]
+        self.assertAlmostEqual(left.size[1], FINGER_THICK_MM, places=9)
+        self.assertAlmostEqual(right.size[1], FINGER_THICK_MM, places=9)
+        # Left opens +Y: box grows outward from the inner face at y=0.
+        self.assertAlmostEqual(left.centre[1], FINGER_INNER_TO_CENTER_MM, places=9)
+        # Right opens -Y: box grows the other way.
+        self.assertAlmostEqual(right.centre[1], -FINGER_INNER_TO_CENTER_MM, places=9)
+
+        # At the calibrated open S the clear gap is the span, with room for a cube.
+        open_s = 140.0  # grip_open_s on the live calib
+        clear_mm = span_mm_for_s(open_s)
+        self.assertGreater(clear_mm, 20.0 + 10.0)  # cube + comfortable margin
+        self.assertAlmostEqual(clear_mm, 38.4, delta=0.2)
+
+    def test_the_grip_force_is_the_cap_not_the_spring(self):
+        """The host closes past contact, so the drive always saturates.
+
+        That is the whole grip model: whatever the object's width, the position
+        error against it is large and the jaws press with FINGER_EFFORT_N.
+        """
         from mt4_sim.chain import (
-            FINGER_SQUEEZE_MM,
+            FINGER_EFFORT_N,
+            FINGER_STIFFNESS_N_PER_M,
+            GRIPPER_S_CLOSED,
             finger_positions_for_s,
-            stalled_finger_targets,
         )
 
-        # Host closed past contact (S=255 -> 0 mm); jaws stopped on a 20 mm cube.
-        commanded = finger_positions_for_s(255)
-        measured = (0.010, 0.010)
-        left, right = stalled_finger_targets(commanded, measured, (0.0, 0.0))
-        self.assertAlmostEqual(left, right, places=12)
-        self.assertAlmostEqual(left, 0.010 - FINGER_SQUEEZE_MM * MM, places=9)
+        # Jaws stopped on a 20 mm cube while the host commands fully shut.
+        target = finger_positions_for_s(GRIPPER_S_CLOSED)[0]
+        self.assertEqual(target, 0.0)
+        spring_n = FINGER_STIFFNESS_N_PER_M * (0.010 - target)
+        self.assertGreater(spring_n, FINGER_EFFORT_N)
 
-    def test_free_space_close_is_not_stalled(self):
-        from mt4_sim.chain import finger_positions_for_s, stalled_finger_targets
+    def test_grip_force_is_sized_for_the_cube_not_the_solver(self):
+        from mt4_sim.chain import (
+            FINGER_DAMPING_N_S_PER_M,
+            FINGER_EFFORT_N,
+            FINGER_STIFFNESS_N_PER_M,
+        )
 
-        commanded = finger_positions_for_s(200)
-        # Tracking closely while still moving: follow the command.
-        measured = (commanded[0] + 0.0005, commanded[1] + 0.0005)
-        left, right = stalled_finger_targets(commanded, measured, (0.02, 0.02))
-        self.assertEqual((left, right), commanded)
+        cube_weight_n = 0.008 * 9.81
+        # Enough: a friction hold needs N * mu >= mg/2 per pad, mu ~ 1.1, and
+        # the arm accelerates the cube as well as carrying it.
+        self.assertGreater(FINGER_EFFORT_N, 10.0 * cube_weight_n)
+        # Not too much: the velocity a capped drive can inject into a 20 g
+        # finger in one 240 Hz substep is what launches a gripped cube. At the
+        # 12 N this replaces it was 2.5 m/s, and cubes were thrown across the
+        # desk.
+        finger_kg, substep_s = 0.02, 1.0 / 240.0
+        self.assertLess(FINGER_EFFORT_N * substep_s / finger_kg, 0.5)
+
+        # And the drive must settle rather than ring: at least critically damped.
+        critical = 2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * finger_kg)
+        self.assertGreaterEqual(FINGER_DAMPING_N_S_PER_M, critical)
+
+    def test_jaws_close_faster_than_the_firmware_sweeps(self):
+        """Terminal closing speed under the force cap is F/c.
+
+        If that were slower than the rate the firmware advances S, the jaws
+        would lag their own command through a free-space close and arrive after
+        the host has already moved on.
+        """
+        from mt4_sim.chain import (
+            FINGER_DAMPING_N_S_PER_M,
+            FINGER_EFFORT_N,
+            GRIPPER_S_OPEN,
+            span_mm_for_s,
+        )
+        from mt4_sim.firmware.state import GRIPPER_SWEEP_RATE_S_PER_S
+
+        terminal_m_s = FINGER_EFFORT_N / FINGER_DAMPING_N_S_PER_M
+        # Each jaw covers half the span while S crosses the range that moves it.
+        moving_s = span_mm_for_s(GRIPPER_S_OPEN) * 1.881
+        jaw_m_s = 0.5 * span_mm_for_s(GRIPPER_S_OPEN) * MM / (
+            moving_s / GRIPPER_SWEEP_RATE_S_PER_S
+        )
+        self.assertGreater(terminal_m_s, jaw_m_s)
 
 
 class UrdfIsWellFormed(unittest.TestCase):

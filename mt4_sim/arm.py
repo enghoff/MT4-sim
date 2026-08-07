@@ -22,8 +22,14 @@ import numpy as np
 from mt4_sim.chain import (
     ARM_JOINT_NAMES,
     DESK_Z_MM,
+    TCP_GRIP_Z_MM,
+    FINGER_ARMATURE_KG,
+    FINGER_DAMPING_N_S_PER_M,
+    FINGER_DYNAMIC_FRICTION,
     FINGER_EFFORT_N,
     FINGER_JOINT_NAMES,
+    FINGER_MAX_SPEED_M_S,
+    FINGER_STATIC_FRICTION,
     FINGER_STIFFNESS_N_PER_M,
     GRIPPER_S_CLOSED,
     GRIPPER_S_OPEN,
@@ -32,7 +38,6 @@ from mt4_sim.chain import (
     finger_positions_for_s,
     model_from_urdf,
     park_pose,
-    stalled_finger_targets,
     urdf_from_model,
 )
 from mt4_sim.urdf import JOINTS
@@ -73,7 +78,15 @@ class SimArm:
 
     def __init__(self, prim_path: str = ARM_PRIM_PATH) -> None:
         from isaacsim.core.prims import SingleArticulation
+        from isaacsim.core.utils.stage import get_current_stage
 
+        # Contact attrs must be finite *before* the articulation view parses
+        # physics; the importer/runtime defaults ``newton:contactGap`` (and
+        # sometimes PhysX offsets) to -inf, which is exactly the "jaws dig
+        # into the cube" failure mode.
+        prepare_gripper_contacts(get_current_stage(), prim_path=prim_path)
+
+        self._prim_path = prim_path
         self._art = SingleArticulation(prim_path=prim_path, name="mt4")
         self._art.initialize()
 
@@ -88,27 +101,26 @@ class SimArm:
         self._gripper_s = float(GRIPPER_S_CLOSED)
         self._commanded: JointAnglesDeg | None = None
         self._configure_finger_drives()
+        self._configure_finger_pads()
 
     def _configure_finger_drives(self) -> None:
-        """Soften and force-cap the jaw drives so a stall does not crush.
+        """Set the jaw drives to the soft, force-capped spring the grip needs.
 
-        The USD may still carry an older import's stiff fingers; rewriting the
-        drive here means a rebuilt scene is not required for the force limit to
-        take effect, only for the URDF effort attribute to match.
+        The USD may still carry an older import's numbers, so rewriting here
+        means a rebuild is not required for the grip force to take effect --
+        only for the URDF's own effort/damping attributes to agree.
         """
-        from pxr import UsdPhysics
+        configure_finger_joints(self._art.prim.GetStage(), prim_path=self._prim_path)
 
+    def _configure_finger_pads(self) -> None:
+        """Bind rubber-pad friction to every finger collision mesh."""
         stage = self._art.prim.GetStage()
-        for name in FINGER_JOINT_NAMES:
-            prim = stage.GetPrimAtPath(f"{ARM_PRIM_PATH}/Physics/{name}")
-            if not prim.IsValid():
-                raise RuntimeError(f"no finger joint prim at {prim.GetPath()}")
-            drive = UsdPhysics.DriveAPI.Get(prim, "linear")
-            if not drive:
-                raise RuntimeError(f"{name} has no linear drive")
-            drive.CreateStiffnessAttr(FINGER_STIFFNESS_N_PER_M)
-            drive.CreateDampingAttr(200.0)
-            drive.CreateMaxForceAttr(FINGER_EFFORT_N)
+        prepare_gripper_contacts(stage, prim_path=self._prim_path)
+        bound = bind_finger_friction(stage, prim_path=self._prim_path)
+        if bound < 2:
+            raise RuntimeError(
+                f"expected a physics material on both finger colliders, bound {bound}"
+            )
 
     # -- commanding -------------------------------------------------------
 
@@ -155,27 +167,42 @@ class SimArm:
     def set_gripper_s(self, s: float, *, teleport: bool = False) -> None:
         """Command the gripper by firmware S value (120 open .. 285 closed).
 
-        Firmware S is open-loop and still goes to the host's close command. The
-        finger *drive* stalls against contact: once the jaws are blocked it
-        holds only a light squeeze, so a cube can rotate into alignment instead
-        of being crushed or ejected.
+        Firmware S is open-loop and goes straight to the host's close command,
+        the same as the real board. So does the finger drive: the host closes
+        *past* contact (S=255 is a negative span, clamped to zero), the drive's
+        position error against an object is therefore always large, and the
+        force cap is what the object actually feels. The jaws are a
+        constant-force closer at ``FINGER_EFFORT_N``, which is how the real
+        servo behaves when it stalls.
+
+        This deliberately does not track contact and hold a position short of
+        it. That was tried: it grips an aligned cube the same, and drops a
+        misaligned one, because a cube rotating flat under the jaws pushes them
+        apart and a latched target never follows it back in.
         """
         if not GRIPPER_S_OPEN <= s <= GRIPPER_S_CLOSED:
             raise ValueError(f"gripper S must be {GRIPPER_S_OPEN}-{GRIPPER_S_CLOSED} (got {s})")
         self._gripper_s = float(s)
-        commanded = finger_positions_for_s(s)
+        positions = np.asarray(finger_positions_for_s(s), dtype=float)
         if teleport:
-            positions = np.asarray(commanded, dtype=float)
             self._art.set_joint_positions(positions, joint_indices=self._finger_dofs)
-            self._drive(positions, self._finger_dofs)
-            return
-        positions = np.asarray(
-            stalled_finger_targets(
-                commanded, self.finger_positions(), self.finger_velocities()
-            ),
-            dtype=float,
-        )
+            self._art.set_joint_velocities(
+                np.zeros(len(self._finger_dofs)), joint_indices=self._finger_dofs
+            )
         self._drive(positions, self._finger_dofs)
+
+    def grip_force_n(self) -> float:
+        """What the harder-pressed jaw is pushing with (N).
+
+        The drive is a spring to the commanded opening, clipped at the force
+        cap, so this is ``min(Fmax, k * how far the jaw is from its target)``.
+        Against any object it reads the cap, which is the point.
+        """
+        targets = finger_positions_for_s(self._gripper_s)
+        behind = max(
+            finger - target for finger, target in zip(self.finger_positions(), targets)
+        )
+        return min(FINGER_EFFORT_N, FINGER_STIFFNESS_N_PER_M * max(0.0, behind))
 
     def move_to_tcp(self, x_mm: float, y_mm: float, z_mm: float, *, j4_deg: float | None = None):
         """Solve the control repo's own position IK and drive there.
@@ -259,12 +286,149 @@ class SimArm:
         return (t[0] * 1000.0, t[1] * 1000.0, t[2] * 1000.0)
 
 
+def configure_finger_joints(stage, *, prim_path: str = ARM_PRIM_PATH) -> int:
+    """Write the jaw drive and its armature onto both finger joints.
+
+    Called at scene-build time so the values are in the USD when physics parses
+    it -- armature in particular has to be there before the articulation is
+    created -- and again from ``SimArm`` so a stale scene still gets the drive.
+    """
+    from pxr import PhysxSchema, UsdPhysics
+
+    n = 0
+    for name in FINGER_JOINT_NAMES:
+        prim = stage.GetPrimAtPath(f"{prim_path}/Physics/{name}")
+        if not prim.IsValid():
+            raise RuntimeError(f"no finger joint prim at {prim_path}/Physics/{name}")
+        drive = UsdPhysics.DriveAPI.Get(prim, "linear")
+        if not drive:
+            raise RuntimeError(f"{name} has no linear drive")
+        drive.CreateStiffnessAttr(FINGER_STIFFNESS_N_PER_M)
+        drive.CreateDampingAttr(FINGER_DAMPING_N_S_PER_M)
+        drive.CreateMaxForceAttr(FINGER_EFFORT_N)
+        physx_joint = PhysxSchema.PhysxJointAPI.Apply(prim)
+        physx_joint.CreateArmatureAttr(FINGER_ARMATURE_KG)
+        physx_joint.CreateMaxJointVelocityAttr(FINGER_MAX_SPEED_M_S)
+        n += 1
+    return n
+
+
+def define_physics_material(
+    stage, path: str, *, static: float, dynamic: float, restitution: float = 0.0
+):
+    """A physics material PhysX will actually read, at ``path``.
+
+    ``UsdPhysics.MaterialAPI`` belongs on a ``UsdShade.Material`` prim that
+    colliders bind to with the ``physics`` purpose. Applied straight to a
+    collider it writes attributes nothing consumes: a 20 mm cube carrying
+    ``physics:staticFriction = 1.1`` that way slides down a 45 deg ramp exactly
+    as far as a cube with no material at all.
+    """
+    from pxr import PhysxSchema, UsdPhysics, UsdShade
+
+    material = UsdShade.Material.Define(stage, path)
+    api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+    api.CreateStaticFrictionAttr(static)
+    api.CreateDynamicFrictionAttr(dynamic)
+    api.CreateRestitutionAttr(restitution)
+    PhysxSchema.PhysxMaterialAPI.Apply(material.GetPrim())
+    return material
+
+
+def bind_physics_material(prim, material) -> None:
+    """Bind ``material`` to ``prim`` for the ``physics`` purpose only.
+
+    Kept separate from the visual binding so a collider can be wood-coloured
+    and rubber-gripped at once.
+    """
+    from pxr import UsdShade
+
+    UsdShade.MaterialBindingAPI.Apply(prim)
+    UsdShade.MaterialBindingAPI(prim).Bind(
+        material, UsdShade.Tokens.weakerThanDescendants, "physics"
+    )
+
+
+PAD_MATERIAL_PATH = "/World/Looks/FingerPadPhysics"
+
+
+def bind_finger_friction(stage, *, prim_path: str = ARM_PRIM_PATH) -> int:
+    """Give both finger colliders the rubber-pad friction. Returns how many.
+
+    A grasp on this arm holds by friction alone, so the pad/cube pair is the
+    whole grip. Authored onto the scene stage rather than the referenced arm
+    layer, so a re-imported arm does not lose it.
+    """
+    from pxr import Usd, UsdPhysics
+
+    material = define_physics_material(
+        stage,
+        PAD_MATERIAL_PATH,
+        static=FINGER_STATIC_FRICTION,
+        dynamic=FINGER_DYNAMIC_FRICTION,
+    )
+    n = 0
+    for link in ("finger_left", "finger_right"):
+        root = stage.GetPrimAtPath(link_prim_path(link, arm_prim_path=prim_path))
+        if not root.IsValid():
+            raise RuntimeError(f"no finger link at {link_prim_path(link, prim_path)}")
+        for prim in Usd.PrimRange(root):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                continue
+            bind_physics_material(prim, material)
+            n += 1
+    return n
+
+
+def prepare_gripper_contacts(stage, *, prim_path: str = ARM_PRIM_PATH) -> int:
+    """Rewrite finite Newton/PhysX contact attrs on finger collision meshes.
+
+    Returns how many collision prims were updated. Safe to call before
+    ``World.reset`` / articulation init and again afterward.
+    """
+    from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
+
+    n = 0
+    for link in ("finger_left", "finger_right"):
+        root = stage.GetPrimAtPath(link_prim_path(link, arm_prim_path=prim_path))
+        if not root.IsValid():
+            continue
+        for prim in Usd.PrimRange(root):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                continue
+            # Author Newton margins even if the schema API has not been applied
+            # yet -- the runtime otherwise defaults contactGap to -inf.
+            gap = prim.GetAttribute("newton:contactGap")
+            if not gap:
+                gap = prim.CreateAttribute("newton:contactGap", Sdf.ValueTypeNames.Float)
+            gap.Set(0.0)
+            margin = prim.GetAttribute("newton:contactMargin")
+            if not margin:
+                margin = prim.CreateAttribute(
+                    "newton:contactMargin", Sdf.ValueTypeNames.Float
+                )
+            margin.Set(0.002)
+            col = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            # Set contact high first so a -inf rest cannot fail validation.
+            col.CreateContactOffsetAttr().Set(0.02)
+            col.CreateRestOffsetAttr().Set(0.0)
+            col.CreateContactOffsetAttr().Set(0.002)
+            n += 1
+    return n
+
+
 def desk_z_mm() -> float:
+    """The wood, in the arm's frame -- the plane the base stands on."""
     return DESK_Z_MM
 
 
 def tcp_above_desk_mm(state: ArmState) -> float:
-    return state.tcp_mm[2] - DESK_Z_MM
+    """How far the TCP is above the height at which the tongs reach the wood.
+
+    Zero means the tong tips are on the desk; this is the number a caller
+    thinking in "clearance above the table" wants, not the TCP's raw Z.
+    """
+    return state.tcp_mm[2] - TCP_GRIP_Z_MM
 
 
 def deg(radians: float) -> float:

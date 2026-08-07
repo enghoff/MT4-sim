@@ -41,6 +41,7 @@ from isaacsim.core.utils.stage import open_stage  # noqa: E402
 
 from mt4_sim import rig  # noqa: E402
 from mt4_sim.arm import SimArm  # noqa: E402
+from mt4_sim.scene import physics_dt  # noqa: E402
 from mt4_sim.chain import (  # noqa: E402
     GRIPPER_S_OPEN,
     HEAD_OFFSET,
@@ -67,8 +68,20 @@ SWEEP: tuple[JointAnglesDeg, ...] = (
 # rods, so it tilts by the drive's steady-state error and swings the TCP through
 # HEAD_OFFSET. The check below asserts the residual *is* that -- which tests the
 # chain exactly -- and separately caps how much tilt is tolerated.
-TCP_TOLERANCE_MM = 0.10
-HEAD_TILT_TOLERANCE_DEG = 0.2
+#
+# UNEXPLAINED_TOLERANCE_MM is the one that tests the chain, and it is met with
+# ~100x to spare (0.0002 mm). The other two only bound the tilt stand-in, and
+# they scale with the physics step: an implicit position drive is effectively
+# softer at a coarser step, so the same drive stiffness droops further. Measured
+# at the worst pose in the sweep, tilt and its TCP artefact are
+#
+#     240 Hz   0.09 deg, 0.05 mm
+#      60 Hz   0.18 deg, 0.11 mm
+#
+# and `mt4_sim.scene.PHYSICS_HZ` is 60. Raising `import_urdf.ARM_STIFFNESS`
+# would buy it back if anything ever cares about a tenth of a millimetre.
+TCP_TOLERANCE_MM = 0.15
+HEAD_TILT_TOLERANCE_DEG = 0.25
 UNEXPLAINED_TOLERANCE_MM = 0.02
 DRIVE_TOLERANCE_DEG = 0.5
 
@@ -385,7 +398,7 @@ def main() -> int:
         return 1
 
     open_stage(str(SCENE_USD))
-    world = World(stage_units_in_meters=1.0)
+    world = World(stage_units_in_meters=1.0, physics_dt=physics_dt())
     world.reset()
 
     arm = SimArm()

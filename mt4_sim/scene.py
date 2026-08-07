@@ -17,11 +17,53 @@ from pathlib import Path
 from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
 from mt4_sim import rig
+from mt4_sim.arm import (
+    bind_finger_friction,
+    bind_physics_material,
+    configure_finger_joints,
+    define_physics_material,
+    prepare_gripper_contacts,
+)
 from mt4_sim.chain import DESK_Z_MM, MM, park_pose, urdf_from_model
 from mt4_sim.markers import quiet_zone_fraction, write_tag_textures
 
 WORLD = "/World"
 ARM_PATH = f"{WORLD}/MT4"
+
+# ``isaacsim.core.api.World`` does *not* read the step rate off the stage -- it
+# takes its own ``physics_dt`` and overrides whatever
+# ``PhysxSceneAPI.timeStepsPerSecond`` says -- so every entry point has to pass
+# ``physics_dt=physics_dt()`` or the scene silently runs at whatever World
+# defaults to rather than what it is authored for.
+PHYSICS_HZ = 60.0
+
+
+def physics_dt() -> float:
+    """The physics step every ``World`` in this project must be built with."""
+    return 1.0 / PHYSICS_HZ
+
+
+# Cube on desk: a plastic cube on a wood top, and the number the gripper cares
+# about most in the whole scene.
+#
+# PhysX averages the pair, so what contact sees is (cube + desk) / 2 = 0.325.
+# The cube used to be authored at 1.1 -- rubber-on-rubber -- for a "grippy"
+# grasp, back when the jaws squeezed at under a newton and needed the help. At
+# 1.5 N the grip does not need it, and a pair mu that high welds the cube to
+# the table: closing on a cube 20 deg off square, the jaws could not turn it at
+# all and jammed on its corners at a 27 mm gap. Measured against pair mu:
+#
+#     0.25  cube slides 13 mm, turns 15.7 of 20 deg, ends face-gripped at 20.6
+#     0.35  cube slides 13 mm, turns 15.6 of 20 deg, ends face-gripped at 20.9
+#     0.50  cube slides  3 mm, turns -2.8 deg, jammed on corners at 27.2
+#     0.80  cube slides  3 mm, turns -3.5 deg, jammed on corners at 26.9
+#
+# The cliff is between 0.35 and 0.50, and 0.2-0.4 is also where plastic on wood
+# actually sits, so the physical value and the working value agree.
+CUBE_STATIC_FRICTION = 0.35
+CUBE_DYNAMIC_FRICTION = 0.30
+DESK_STATIC_FRICTION = 0.30
+DESK_DYNAMIC_FRICTION = 0.25
 
 
 def _rgb(v: tuple[float, float, float]) -> Gf.Vec3f:
@@ -147,9 +189,13 @@ def add_physics_scene(stage) -> None:
     scene.CreateGravityMagnitudeAttr(9.81)
     physx = PhysxSchema.PhysxSceneAPI.Apply(scene.GetPrim())
     physx.CreateEnableCCDAttr(True)
-    # 20mm cubes and 8mm-thick fingers are small next to a 1/60s step; 240Hz
-    # keeps a closing jaw from tunnelling through a cube between substeps.
-    physx.CreateTimeStepsPerSecondAttr(240)
+    # Recorded on the stage for anything that reads it; `World` does not, which
+    # is what `physics_dt()` exists to carry.
+    physx.CreateTimeStepsPerSecondAttr(int(PHYSICS_HZ))
+    # Extra position iterations: small contacts under a force-limited grip
+    # otherwise leave millimetres of visible overlap before the solver settles.
+    physx.CreateMinPositionIterationCountAttr(8)
+    physx.CreateMaxPositionIterationCountAttr(16)
 
 
 def add_lighting(stage) -> None:
@@ -180,15 +226,21 @@ def _static_box(stage, path: str, size_m, centre_m, material):
 def add_desk(stage) -> None:
     """The work surface, and the wall behind it.
 
-    One surface, top at ``DESK_Z_MM``. The arm is mounted at its back edge with
-    everything below the shoulder under the wood, so the surface carries on
-    past the arm rather than starting in front of it -- which is how
-    ``calibrate_table_edge.py`` came to measure that edge running *behind* the
-    J1 axis. The bay is what keeps that arrangement legal: the rotating column
-    sweeps a 67mm radius, and a tabletop through it would be a static collider
-    inside the articulation's swept volume, jamming the base yaw solid.
+    One surface, top at ``DESK_Z_MM`` -- which is z = 0, the plane the arm's own
+    base stands on. The surface carries on *past* the arm rather than starting in
+    front of it, which is how ``calibrate_table_edge.py`` came to measure that
+    edge running behind the J1 axis.
+
+    The bay is a hole cut around the base's footprint. With the arm standing on
+    the desk rather than sunk through it the bay is no longer load-bearing, but
+    it costs nothing and keeps the wood from being a static collider coincident
+    with the base's own foot.
     """
     wood = _preview_material(stage, f"{WORLD}/Looks/Desk", rig.DESK_RGB, 0.8)
+    wood_physics = define_physics_material(
+        stage, f"{WORLD}/Looks/DeskPhysics", static=DESK_STATIC_FRICTION,
+        dynamic=DESK_DYNAMIC_FRICTION,
+    )
     UsdGeom.Scope.Define(stage, f"{WORLD}/Desk")
 
     back = rig.desk_back_x_mm
@@ -204,7 +256,14 @@ def add_desk(stage) -> None:
         piece = _slab(
             stage, f"{WORLD}/Desk/{name}", outline, DESK_Z_MM, rig.DESK_THICKNESS_MM
         )
-        _bind(piece.GetPrim(), wood)
+        prim = piece.GetPrim()
+        _bind(prim, wood)
+        # Explicit wood friction so cube/desk contact is not the PhysX default
+        # and a yawed grip can rotate a cube on the tabletop rather than
+        # skating it. Bound with the physics purpose -- see
+        # ``arm.define_physics_material`` for why applying the API to the
+        # collider itself is a no-op.
+        bind_physics_material(prim, wood_physics)
 
     _static_box(
         stage,
@@ -246,6 +305,10 @@ def add_markers(stage, texture_dir: Path) -> None:
 def add_cubes(stage) -> None:
     side = rig.CUBE_SIZE_MM * MM
     UsdGeom.Scope.Define(stage, f"{WORLD}/Cubes")
+    cube_physics = define_physics_material(
+        stage, f"{WORLD}/Looks/CubePhysics", static=CUBE_STATIC_FRICTION,
+        dynamic=CUBE_DYNAMIC_FRICTION,
+    )
 
     for index, cube in enumerate(rig.CUBES, start=1):
         path = f"{WORLD}/Cubes/cube_{index}_{cube.color}"
@@ -263,12 +326,14 @@ def add_cubes(stage) -> None:
         rigid = UsdPhysics.RigidBodyAPI.Apply(prim)
         rigid.CreateRigidBodyEnabledAttr(True)
         UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(0.008)
-        # A grasp holds by friction alone -- there is no suction on this arm --
-        # so the jaw/cube pair needs a grippy contact or picks slide out.
-        material = UsdPhysics.MaterialAPI.Apply(prim)
-        material.CreateStaticFrictionAttr(1.1)
-        material.CreateDynamicFrictionAttr(1.0)
-        material.CreateRestitutionAttr(0.0)
+        bind_physics_material(prim, cube_physics)
+        # Match the finger contact offsets; stage-scale defaults (~20 mm) let a
+        # gripped cube show a deep overlap even when the solver is "in contact".
+        col = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+        # Create*Attr defaults to -inf on this build; Set the values explicitly.
+        col.CreateRestOffsetAttr().Set(0.0)
+        col.CreateContactOffsetAttr().Set(0.002)
+        PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateEnableCCDAttr(True)
         _bind(prim, _preview_material(stage, f"{WORLD}/Looks/Cube_{index}", rig.CUBE_RGB[cube.color]))
 
 
@@ -409,4 +474,7 @@ def build(stage, arm_usd: Path, texture_dir: Path) -> list[str]:
     add_cubes(stage)
     add_scene_camera(stage)
     add_arm(stage, arm_usd)
+    prepare_gripper_contacts(stage)
+    bind_finger_friction(stage)
+    configure_finger_joints(stage)
     return set_park_pose(stage)

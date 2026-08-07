@@ -241,18 +241,23 @@ class TestGripper(unittest.TestCase):
         machine.handle_line("g 120")
         run_for(machine, 3.0)
         self.assertEqual(machine.handle_line("g c"), ["ok grip close"])
-        # Sim runs at 180 S/s (1.5x firmware); 165-unit span is 0.917s.
-        run_for(machine, 0.7)
+        # Motion at 360 S/s: 165-unit span is 0.458s. Hold paced at 180 S/s.
+        run_for(machine, 0.35)
         self.assertLess(machine.state.gripper.s, GRIPPER_S_CLOSED)
-        run_for(machine, 0.4)
+        self.assertFalse(machine.state.gripper.settled)
+        run_for(machine, 0.20)
         self.assertAlmostEqual(machine.state.gripper.s, GRIPPER_S_CLOSED, delta=0.5)
+        # S arrived early; station hold still running.
+        self.assertFalse(machine.state.gripper.settled)
+        run_for(machine, 0.45)
+        self.assertTrue(machine.state.gripper.settled)
         self.assertEqual(machine.handle_line("g c"), ["ok grip at closed"])
 
     def test_absolute_grip_drives_the_arm(self) -> None:
         arm = RecordingArm()
         machine = homed_machine(arm)
         self.assertEqual(machine.handle_line("g 200"), ["ok grip"])
-        run_for(machine, 1.5)
+        run_for(machine, 0.8)
         self.assertAlmostEqual(arm.gripper_s, 200.0, delta=0.5)
 
     def test_gripper_does_not_stop_a_move(self) -> None:

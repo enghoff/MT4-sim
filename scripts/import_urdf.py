@@ -45,7 +45,8 @@ ARM_STIFFNESS = 12000.0
 
 # The jaws are the exception: a grasp holds by squeezing, so the finger drives
 # are deliberately soft and force-limited. N per metre; matched to
-# ``mt4_sim.chain.FINGER_STIFFNESS_N_PER_M`` so a 1.5 mm squeeze is under 1 N.
+# ``mt4_sim.chain.FINGER_STIFFNESS_N_PER_M``. The host closes past contact, so
+# the spring always saturates and the grip force is the drive's force cap.
 FINGER_STIFFNESS = FINGER_STIFFNESS_N_PER_M
 
 from isaacsim import SimulationApp  # noqa: E402

@@ -149,11 +149,27 @@ class SceneCamera:
     residual_mm: float
 
 
+def desk_surface_z_mm() -> float:
+    """The work surface itself, in the arm's frame: the plane its base stands on.
+
+    Not the same number as :func:`table_z_mm`. That one is a *TCP* height -- the
+    Z the arm is commanded to in order to grip something lying on the table --
+    and the gripper's tongs hang below the TCP, so the wood is that much lower
+    than the TCP that reaches it. The tongs are as long as they need to be for
+    the surface to land here, on the plane the arm's own base sits on, which is
+    what puts the MT4 on top of the desk rather than sunk into it.
+    """
+    return 0.0
+
+
 def lens_position_mm() -> tuple[float, float, float]:
-    """The lens, from the nadir and height ``calibrate_camera_nadir.py`` fit."""
+    """The lens, from the nadir and height ``calibrate_camera_nadir.py`` fit.
+
+    The height is measured above the *wood*, so it hangs off the surface plane.
+    """
     nadir = _require(CALIBRATION.cam_xy_robot, "cam_xy_robot")
     height = _require(CALIBRATION.cam_height_mm, "cam_height_mm")
-    return float(nadir[0]), float(nadir[1]), table_z_mm() + float(height)
+    return float(nadir[0]), float(nadir[1]), desk_surface_z_mm() + float(height)
 
 
 def _fit_samples(step_mm: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
@@ -219,7 +235,9 @@ def scene_camera() -> SceneCamera:
     edges rather than exactly.
     """
     lens = lens_position_mm()
-    table_z = table_z_mm()
+    # The plane the camera is looking at is the wood, not the TCP height that
+    # grips something lying on it.
+    table_z = desk_surface_z_mm()
     resolution = frame_size_px()
     points, truth = _fit_samples()
 
