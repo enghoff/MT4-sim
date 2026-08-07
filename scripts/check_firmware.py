@@ -6,9 +6,9 @@ tests drive it with ``Mt4Client``. This one checks it against the world: it runs
 ``mt4_vision.pickplace.pick`` and ``place``, unmodified, over a real socket, and
 then looks at where the cube ended up on the stage.
 
-If a cube that was at (232, -95) is found at the place target afterwards, then
-the serial protocol, the motion planning, the grip timing, the jaw friction and
-the arm's kinematics all did their jobs in the right order.
+If the first red cube in ``rig.CUBES`` is found at the place target afterwards,
+then the serial protocol, the motion planning, the grip timing, the jaw friction
+and the arm's kinematics all did their jobs in the right order.
 
     python scripts/check_firmware.py
 """

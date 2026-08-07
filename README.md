@@ -264,10 +264,16 @@ recalibration on the real rig is one `build_scene.py` away from being true here.
   `raw_marker_observations`, mapped onto the table through the same homography
   the live stack uses.
 - **Nine cubes**, 20 mm, in the colours the HSV detector knows, at plastic-on-wood
-  friction — see below, it is the number the gripper is most sensitive to. Placed where the
-  reachable annulus, the camera's actual frame coverage and the tag positions all
-  leave room — the real camera sees out to only x ≈ 270, far short of the arm's
-  338 mm reach at table height.
+  friction — see below, it is the number the gripper is most sensitive to.
+  Positions come from `tools/spread_cubes.py` rather than by hand: it maps
+  everywhere a cube is *permitted* to sit and takes the arrangement with the
+  largest smallest gap, which puts the closest pair 111 mm apart where the
+  hand-placed set managed 51 mm. Five things bound that region and every one of
+  them binds somewhere — the firmware's 140 mm keep-out cylinder, reach at the
+  +70 mm transit height as well as at the table, a 300 mm ceiling well inside the
+  359 mm the IK will solve, the hull the calibration was actually *fit* over
+  (outside it the pixel↔table map is extrapolating), and the tag cards, which are
+  59 mm across including the quiet zone rather than the 44.3 mm of printed black.
 - **Lighting kept deliberately dim.** A bright dome washes saturation out of every
   coloured face, and a red cube under a strong dome falls out of its own hue band
   while still looking obviously red to a human.

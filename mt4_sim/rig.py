@@ -117,24 +117,38 @@ CUBE_RGB = {
     "blue": (0.09, 0.24, 0.70),
     "yellow": (0.86, 0.72, 0.09),
 }
-# Placed where every constraint holds at once: inside what the real camera's
-# frame covers (which stops at x ~ 270, well short of the arm's 338mm reach at
-# table height), clear of the tags since a cube parked on one costs a decode,
-# and reachable through a whole pick -- not just at table height but at the
-# +70mm the live stack transits at, where the annulus's inner edge jumps from
-# radius 104 out to about 134 and would otherwise strand a cube it can grip.
-# Nine cubes (three each of red, green, blue — the colours a nine-level
-# stack_cubes run needs); centres stay ≥45mm apart and clear of the five tags.
+# Nine cubes -- three each of red, green and blue, the colours a nine-level
+# `stack_cubes` run needs -- spread as far apart as the rig allows rather than
+# clustered in front of the arm. `tools/spread_cubes.py` picks them: it maps
+# every place a cube is *permitted* to be and then takes the arrangement with the
+# largest smallest gap, which comes out at 111mm between the closest pair where
+# the hand-placed set managed 51mm.
+#
+# Five things bound that region at once, and all of them bite somewhere:
+#
+#   * the firmware's keep-out cylinder -- `KEEPOUT_RADIUS_MM` = 140 about the J1
+#     axis, at any height -- which is why nothing sits closer in than r = 164
+#   * reachable through a whole pick: not only at table height but at the +70mm
+#     the live stack transits at, where the reachable annulus is smaller
+#   * r <= 300, well inside the 359mm the IK will actually solve. The last few
+#     tens of millimetres are the arm at full stretch, where the elbow is nearly
+#     straight and joint error swings the TCP a long way
+#   * inside the region the calibration was *fit* over, not merely inside the
+#     frame. Outside the probe hull the pixel<->table homography is
+#     extrapolating, and the live stack reads cube positions through that map
+#   * clear of the five tag cards, which are 59mm across including the quiet
+#     zone, not the 44.3mm of printed black -- a cube parked on one costs a
+#     decode. Every cube keeps at least 8mm of visible wood to the nearest card.
 CUBES: tuple[Cube, ...] = (
-    Cube("red", 232.0, -95.0),
-    Cube("green", 232.0, 95.0),
-    Cube("blue", 135.0, -58.0, 25.0),
-    Cube("green", 133.0, 60.0, -15.0),
-    Cube("red", 265.0, -55.0, -10.0),
-    Cube("green", 265.0, 55.0, 10.0),
-    Cube("blue", 175.0, -90.0, -30.0),
-    Cube("red", 175.0, 90.0, 30.0),
-    Cube("blue", 145.0, 0.0, 20.0),
+    Cube("red", 248.0, -44.0, 0.0),
+    Cube("green", 244.0, 120.0, 25.0),
+    Cube("blue", 240.0, -180.0, -15.0),
+    Cube("red", 196.0, 224.0, 30.0),
+    Cube("green", 156.0, 52.0, -10.0),
+    Cube("blue", 132.0, -264.0, 20.0),
+    Cube("red", 92.0, -136.0, -30.0),
+    Cube("green", 92.0, 264.0, 10.0),
+    Cube("blue", 80.0, 144.0, -20.0),
 )
 
 DESK_TOP_Z_MM = DESK_Z_MM
