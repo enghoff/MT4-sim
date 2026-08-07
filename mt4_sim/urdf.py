@@ -21,13 +21,11 @@ from xml.etree import ElementTree as ET
 from mt4_sim.chain import (
     CENCER_HEIGHT,
     CENCER_OFFSET,
-    DESK_Z_MM,
     GRIPPER_S_OPEN,
     HEAD_HEIGHT,
     HEAD_OFFSET,
     LINKAGE1,
     LINKAGE2,
-    MAX_SPAN_MM,
     MM,
     span_mm_for_s,
     urdf_limits,

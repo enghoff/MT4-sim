@@ -14,19 +14,24 @@ copied, so the simulated arm cannot drift from the firmware.
 
 ## What is verified
 
-`scripts/check.py` runs four checks against the live stack's own code, and all
-four pass:
+`scripts/check.py` runs five checks against the live stack's own code and data,
+and all five pass:
 
 | Check | Result |
 |---|---|
 | The URDF chain reproduces `mt4_jog.kinematics.fk_tcp` | **0.0002 mm** unexplained across the soft-limit box |
 | Position drives settle at the commanded pose | **≤ 0.04°** per joint |
-| The simulated camera's ArUco tags decode | **6 of 6**, via `cv2.aruco` DICT_4X4_50 |
-| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **4 of 4**, 2157–4066 px² blobs |
+| The simulated camera's ArUco tags decode | **5 of 5**, via `cv2.aruco` DICT_4X4_50 |
+| Those tags, read back with the rig's own `vision_calibration.json` | **7–22 mm** and **≤ 3.6°** from where that file says they are taped |
+| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **4 of 4**, 2129–3326 px² blobs |
 
-That last pair matters more than it looks: the simulated scene camera's frames
-go straight into the real `mt4_vision.detect` with nothing adapted. The cube
-blob areas land inside the 1600–3600 px² the repo measured on the live rig.
+The last three matter more than they look: the simulated scene camera's frames
+go straight into the real `mt4_vision.detect` and the real `Calibration` with
+nothing adapted. The cube blob areas land inside the 1600–3600 px² the repo
+measured on the live rig, and a tag detected in a simulated frame, pushed
+through the live homography, comes out where the live rig says that tag is —
+which is the strongest available statement that the two scenes are the same
+scene.
 
 ## Quick start
 
@@ -40,11 +45,15 @@ $env:PY = "Z:\IsaacSim\venv\Scripts\python.exe"
 
 & $env:PY scripts/run_sim.py            # open the GUI, arm parks and holds
 & $env:PY scripts/run_sim.py --demo     # tour the desk: hover every tag and cube
-& $env:PY -m unittest discover -s tests # chain maths, no GPU needed
+& $env:PY -m unittest discover -s tests # chain maths + firmware protocol, no GPU
+
+& $env:PY scripts/serve_firmware.py     # be the arm's firmware, on a socket
+& $env:PY scripts/check_firmware.py     # a control-repo pick, on a simulated cube
 ```
 
 The control repo must be reachable. It defaults to the sibling `Z:\MT4`;
-override with `MT4_REPO`.
+override with `MT4_REPO`. Driving the sim with control-repo code also needs its
+`pyserial` in whatever interpreter runs the script.
 
 ## The parallel linkage, as a serial chain
 
@@ -84,30 +93,68 @@ small reversing moves.
 Modelling the rods properly needs a closed kinematic loop, which URDF cannot
 express and USD can. Worth doing only if something starts caring about 0.06 mm.
 
-## Frames, and the base height
+## Frames: what z = 0 is, and where the desk sits
 
 The stage is authored in the arm's **home-angle frame**, the frame every
-coordinate in the MT4 stack lives in. Two consequences, one of them a question
-for whoever knows the rig:
+coordinate in the MT4 stack lives in.
 
-- **The desk surface is at z = 120 mm.** That is where the live rig measured
-  desk contact (2026-08-04, camera-tracked descent), and `Calibration.table_z`
-  calls it both the table surface's robot-frame Z and the TCP Z that grips a cube
-  sitting on it.
-- **So the shoulder pivot is 20 mm above the desk**, because `CENCER_HEIGHT` puts
-  it at z = 140. The real MT4's base column is 130 mm tall, so this cannot be
-  physically true — the model's z origin is offset from the arm's mounting plane
-  by something the calibration silently absorbs.
+**z = 0 is a modelling origin, not a surface.** It is the plane exactly 140 mm
+straight below the J2 shoulder pivot, on the J1 turning axis, inherited from the
+factory link geometry: `fk_tcp` builds TCP height as shoulder pivot 140, plus the
+two link contributions, minus 14.43 mm for the drop from the wrist pivot down to
+the gripper pads. Nothing physical sits at that plane and the gripper cannot be
+commanded to it — the lowest the pads reach inside the soft joint limits is
+z ≈ 37 mm.
 
-The sim keeps the model frame, because that is what makes coordinates
-interchangeable with the live rig, and renders the base as the 20 mm plinth the
-frame implies. **If the true offset is known, the base and gripper can be drawn
-at their real heights with a fixed visual offset and no change to the
-kinematics.** Until then the arm looks squat around the base and the gripper is
-compressed: `HEAD_HEIGHT` = 14.43 mm puts the fingertips just under the wrist,
-where the real gripper hangs a good deal lower.
+**The work surface is at z = 122 mm** — `Calibration.table_z`, read live out of
+the rig's own `vision_calibration.json` rather than restated here. It is both
+the table surface's robot-frame Z and the TCP Z that grips a cube sitting on it.
 
-`mt4_sim.chain.DESK_Z_MM` is the single place this is set.
+So the shoulder pivot clears the work surface by **18 mm**, and everything
+below the shoulder is *under* the wood. That is not a modelling choice; it is
+what the rig's own numbers say, three times over:
+
+- **The arm cannot reach a surface at its own foot.** The lowest the pads go
+  anywhere inside the soft joint limits is z ≈ 37, and out in the annulus where
+  the tags are it is z ≈ 100. A desk at z = 0 would be unreachable everywhere,
+  and no cube on it could ever be picked.
+- **`GROUND_Z_MM` = 115 exists because the limits let the arm go *below* the
+  surface.** A firmware floor a few mm under the table is only needed if the
+  table is inside the reachable volume, not beneath it.
+- **`calibrate_table_edge.py` measured the desk's back edge at x ≈ −76** — behind
+  the J1 axis, running through the base's own 140 mm footprint. The desk runs
+  *past* the arm; it does not stop in front of it.
+
+The sim therefore draws **one flat surface**, top at z = 122, spanning the
+measured back edge out to the frame edges, with a **bay** cut back from the rear
+edge for the arm. The bay is not decoration: the rotating column sweeps a 67 mm
+radius, and a tabletop through it is a static collider inside the articulation's
+swept volume, which jams the base yaw solid.
+
+### The one thing that does not add up
+
+The CAD's `base_link` is **130 mm tall**, and the surface is 18 mm below the
+shoulder pivot — so the arm's base sits below the work surface, mounted at its
+back edge rather than standing on top of it. If the real rig has the MT4
+standing *on* the desk, then `CENCER_HEIGHT` = 140 and `Calibration.table_z` =
+122 cannot both be right, and it is `table_z` that would need re-measuring:
+120–122 is suspiciously close to `GROUND_Z_MM` = 115, and `docs/CALIBRATION.md`
+already warns that a touch which hit the guard clamp instead of the desk records
+right about there. Everything downstream of the table height — every pick, the
+whole vision map — is self-consistent either way, which is exactly why the
+disagreement can sit there unnoticed.
+
+Knobs: `chain.DESK_Z_MM` (read from the calibration), `rig.DESK_FRONT_X_MM` and
+`rig.DESK_HALF_Y_MM` for how far the surface runs, `rig.DESK_BAY_*` for the bay.
+
+### The gripper really is that compact
+
+`HEAD_HEIGHT` = 14.43 mm is the whole drop from the wrist pivot to the pads, so
+there is room for the jaws below the level plate and nothing else. The jaws are
+drawn rising from the pads rather than hanging below them — a cube on the desk is
+gripped with the TCP at table height, so a jaw reaching under the pads would be
+driven into the desk on every pick. The servo housing sits on top of the plate,
+which is where the room is.
 
 ## The CAD independently confirms the kinematics
 
@@ -149,32 +196,62 @@ through-holes where the STEP has stepped bearing seats.
 
 ## The scene
 
-Authored by `mt4_sim/scene.py` from the layout table in `mt4_sim/rig.py`.
+Authored by `mt4_sim/scene.py`. Most of the layout is not written down in this
+repo at all: `mt4_sim/calibration.py` reads the live rig's
+`vision_calibration.json` and hands back the table height, the tags and the
+camera, the same way `mt4_sim/chain.py` reads the firmware's kinematics. A
+recalibration on the real rig is one `build_scene.py` away from being true here.
 
-- **Desk** — wood-toned, top face at z = 120. The tone is not decoration: the
-  live `mt4_vision.detect` has no "orange" cube colour precisely because the wood
-  table and red cubes' shaded faces share that hue band.
-- **Wall** behind the arm, because `calibrate_table_edge.py` needs it visible.
-- **Six ArUco tags**, real DICT_4X4_50 codes rendered at 768 px with a quiet
-  zone, 50 mm squares, laid out across the reachable annulus.
+- **Work surface** — wood-toned, top face at z = 122 (`Calibration.table_z`),
+  running from the measured back edge out past the camera's frame, with a bay for
+  the arm. The tone is not decoration: the live `mt4_vision.detect` has no
+  "orange" cube colour precisely because the wood table and red cubes' shaded
+  faces share that hue band.
+- **Wall** well behind the arm, because `calibrate_table_edge.py` needs a
+  backdrop to find the desk's edge against. It has to stand off: J1's soft limits
+  reach −137°, which swings the gripper back to x = −288.
+- **Five ArUco tags** — the ids, positions, orientations and printed size the
+  live calibration was fit against. Centres are the arm's own touches; the yaw
+  and the 44.3 mm black square are recovered from the pixel corners in
+  `raw_marker_observations`, mapped onto the table through the same homography
+  the live stack uses.
 - **Four cubes**, 20 mm, in the four colours the HSV detector knows, with grippy
-  friction because a grasp on this arm holds by friction alone.
+  friction because a grasp on this arm holds by friction alone. Placed where the
+  reachable annulus, the camera's actual frame coverage and the tag positions all
+  leave room — the real camera sees out to only x ≈ 270, far short of the arm's
+  338 mm reach at table height.
 - **Lighting kept deliberately dim.** A bright dome washes saturation out of every
   coloured face, and a red cube under a strong dome falls out of its own hue band
   while still looking obviously red to a human.
-- **Scene camera**, 1280×720, mounted obliquely off the far +X side and aimed back
-  across the desk.
+- **Scene camera**, 1280×720, at the lens position the rig measured.
 
-### The camera is not the rig's camera
+### The camera *is* the rig's camera
 
-The live mount was measured at nadir (518, −35), lens 244 mm above the table.
-Reproducing that literally needs about a 120° field to cover the work area, which
-is a fisheye. The real rig's intrinsics are recorded nowhere — its calibration is
-a homography fit straight from tag pixels to robot millimetres and deliberately
-needs none — so the sim keeps the *character* of the mount (off-desk nadir on the
-+X side, steeply oblique) at 420 mm, where a 50° lens covers everything.
-`check.py` prints both geometries side by side. `rig.CAM_POSITION_MM` /
-`CAM_TARGET_MM` are the knobs.
+The lens sits exactly where `calibrate_camera_nadir.py` put it: nadir (505, 1),
+242 mm above the table. Where it points and how wide it sees are recorded
+nowhere — the rig's calibration is a homography fit straight from tag pixels to
+millimetres and deliberately needs no intrinsics — so `mt4_sim.calibration` fits
+those three numbers back out of the homography itself, with the lens pinned. For
+a pinhole, a plane homography *is* the aim and the focal length.
+
+It comes out aimed at (−33, −36) with a **76° horizontal field**: nearly past
+the desk, which is why the work area sits in the lower half of the frame in the
+rig's own captures and now does in the sim's. That reproduces the rig's
+pixel↔table map to **21 px rms (14 mm)**, and `check.py` prints it.
+
+The residual is the real lens's barrel distortion, which no pinhole can express.
+Letting the lens position float as well cuts it to 7 px — but lands 70 mm from
+where the rig measured the lens, which is distortion being absorbed as a wrong
+camera position. The sim keeps the measured position and reports the error.
+
+### Tag textures are content-addressed, and have to be
+
+Kit caches textures by path and does not notice the file changing underneath it.
+Change which tags the rig carries, and the renderer will draw the *previous* tag
+from a path whose contents have since been rewritten — a scene that is correct in
+USD, correct on disk, and wrong in the frame. `markers.write_tag_textures` puts a
+hash of the image in the filename so a path can only ever hold one image, and
+deletes tags left over from an earlier layout.
 
 ## Layout
 
@@ -182,36 +259,118 @@ needs none — so the sim keeps the *character* of the mount (off-desk nadir on 
 |---|---|
 | `mt4_sim/chain.py` | model angles ↔ URDF joints, limits, gripper span, `DESK_Z_MM` |
 | `mt4_sim/urdf.py` | the URDF: link shapes, masses, joint table |
-| `mt4_sim/rig.py` | desk, tags, cubes, camera — the scene's layout numbers |
+| `mt4_sim/calibration.py` | reads `vision_calibration.json` as scene geometry: table, tags, camera |
+| `mt4_sim/rig.py` | desk extent, colours, cubes — the layout the calibration has no opinion on |
 | `mt4_sim/scene.py` | builds the stage |
 | `mt4_sim/arm.py` | `SimArm`: drive by model angles, read TCP, solve the repo's IK |
 | `mt4_sim/markers.py` | renders the ArUco tag textures |
 | `mt4_sim/mt4_repo.py` | finds the control repo and puts it on `sys.path` |
+| `mt4_sim/firmware/` | the firmware's serial personality: `state`, `planner`, `machine`, `link` |
 | `scripts/` | `build_urdf` → `import_urdf` → `build_scene` → `check` / `run_sim` |
+| `scripts/serve_firmware.py` | the scene, answering the MT4 protocol on a socket |
+| `scripts/run_against_sim.py` | runs any control-repo script against that socket |
 | `tests/test_chain.py` | chain maths against `mt4_jog.kinematics`, no GPU |
+| `tests/test_firmware.py` | the protocol, checked with the control repo's own client |
 | `tools/step_assembly.py` | STEP assembly parser and bore-based kinematic audit |
 | `vendor/MT4-STL/` | WLKATA's official STL + STEP CAD (upstream clone) |
 | `assets/`, `out/` | generated USD and renders |
 
+## The firmware, replaced
+
+Everything in the control repo above the serial port — `mt4_vision`'s pick/place
+primitives, the task scripts, the MCP tools — talks to one thing: an
+`Mt4Client` that opens a COM port, writes `mp 230 -60 122 h 0`, and waits for
+`mp done pos ...`. `mt4_sim/firmware/` puts something on the other end of that
+port that answers the way the firmware answers, so all of it drives the
+simulation with **no change to any of it**.
+
+```powershell
+& $env:PY scripts/serve_firmware.py            # the arm, on a socket
+& $env:PY scripts/run_against_sim.py --check   # what the client sees
+& $env:PY scripts/run_against_sim.py -- Z:\MT4\jog.py   # any control-repo script
+& $env:PY scripts/demo_pick_place.py           # pickplace.pick/place, on a cube
+& $env:PY scripts/check_firmware.py            # does a real pick move a real cube?
+```
+
+`serve_firmware.py` steps the scene, paced to the wall clock — the host is
+timing us, so a move that takes 4 s on the bench has to take 4 s here or every
+timeout in `Mt4Client` means something different.
+
+### The counters are the truth, here as there
+
+The real firmware is **open loop**: `pos` is a set of step counters it has been
+incrementing since the last home, and there is no encoder to disagree. So this
+keeps the counters as the authority too and drives the simulated arm to follow
+them — the same relationship the real steppers have to their pulse train. It
+also means the two commands that renumber without moving (`setpos`, `j4zero`)
+are free on hardware and are not here, so a per-joint bias records what the
+counters claim versus where the arm was actually left.
+
+| Faithful | How |
+|---|---|
+| Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; the gripper sweeps at the firmware's 120 S/s |
+| Path shape | `mp`/`mq` chop a straight world line into 2 mm segments and solve each with the control repo's own `ik_position`, routing tangent-arc-tangent around the 140 mm keep-out cylinder |
+| Rejections | `err not homed`, `err mp keepout`, `err mp ground z<115.0`, `err mp joints`, `err mq full 8`, `err mq station pose want … at …` — the exact strings the host greps for |
+| Queue semantics | `mq` cold-starts when idle and queues when not, a drained queue emits one `mp done`, `mp` mid-flight overrides and drops the queue, a grip station holds everything until the jaws finish |
+
+### Where it is a stand-in and says so
+
+**Homing does not seek.** There are no limit switches on the stage, so `home`
+drives to the pose homing ends at over `--home-seconds` rather than the real
+seek's tens of seconds of hunting.
+
+**No acceleration ramp.** The firmware ramps a move in and out over ~60 ticks
+either side; this runs the whole leg at the step period, so a short leg finishes
+a few tens of milliseconds early.
+
+**Floating the drivers does not make the arm fall.** `e0` / `all f` set the flag
+`?` reports and stop nothing else, where the real arm goes limp and loses its
+counters. Worth knowing because `jog.py` sends `all f` on startup.
+
+**"Done" waits for the drives.** A stepper is wherever its last pulse put it; a
+position drive is still a fraction of a degree behind. Reporting `mp done` the
+instant the counters arrive left the arm 3.3 mm out and still moving — which a
+host that captures a camera frame on that line would photograph. So a completed
+path settles to 0.02° before the line goes out, which is what makes the word
+mean the same thing at both ends.
+
+### Pointing a script at it
+
+`mt4_jog.serial.open_serial` opens a COM port by name; nothing in the control
+repo asks for a URL. `run_against_sim.py` replaces that one function with one
+that dials the simulator's socket and then runs the target script exactly as
+`python` would — so the script, and `Mt4Client`, never know. If you would rather
+patch nothing at all, serve on one half of a virtual null-modem pair
+(`--listen COM21`) and point the script at the other half the normal way.
+
+### What it is checked against
+
+`tests/test_firmware.py` is 25 tests that never construct an expected string by
+hand: replies are parsed with the control repo's own `mt4_jog.status`, and two
+of them drive the machine with a real `Mt4Client` over a real socket, including
+a queued pick-and-place path with a firmware grip station.
+`scripts/check_firmware.py` goes further and asks the world instead of the
+protocol — it runs `mt4_vision.pickplace.pick`/`place` unmodified and then looks
+at where the cube ended up on the stage. It lands 12 mm from the place target,
+and that residual is the gripper, not the protocol: the calibration closes to
+S=255, which the jaw-span model puts past zero opening, so the simulated fingers
+squeeze a 20 mm cube the real servo would just stall against.
+
 ## What this does not do
 
-**No motion planning.** The firmware's `mp`/`mq` interpolate straight
-world-frame lines, route around the J1 keep-out cylinder and validate every
-segment. `SimArm` drives joints to a target and lets physics get there. Reach
-failures come back the same way the real client's do — `move_to_tcp` returns
-`None` off the control repo's own `ik_position` — but nothing here refuses a path
-that would clip the keep-out.
+**No camera.** This is the other half of the substitution and it is not built.
+`mt4_vision` opens a USB camera through OpenCV, so anything that *detects* — the
+task scripts, the calibration routines — still needs a real one. The scene
+camera is already rendered and already in the rig's own frame
+(`scripts/check.py` proves a tag decoded from it reads back through the live
+calibration to within 22 mm), so what is missing is the plumbing that serves
+those frames where `mt4_vision.camera` looks for them, not the frames.
 
-**No envelope guard.** `set_model_angles` checks the firmware's soft joint
-limits and nothing else. The ground-Z floor and keep-out cylinder that gate all
-four real control paths are not reimplemented; the desk is a collider, so the
+**No envelope guard below the firmware layer.** `SimArm.set_model_angles` checks
+the soft joint limits and nothing else. The ground-Z floor and keep-out cylinder
+are enforced by `mt4_sim/firmware` on the `mp`/`mq` path, as on the real arm, but
+a caller poking `SimArm` directly bypasses them; the desk is a collider, so the
 arm stops on it rather than being refused.
-
-**No entity layer.** `mt4_vision.entities`, the pick/place primitives and the
-MCP tools all talk to a serial `Mt4Client`. Nothing here pretends to be one, so
-the task scripts do not drive the sim yet. A shim that answers `pos`/`mp`/`g` on
-a socket is the natural bridge, and would make `stack_cubes.py` run against this
-scene unmodified.
 
 **Nominal masses.** The arm is position-driven, so link masses set how hard the
 solver works, not where the TCP ends up. They are estimates, not measurements.

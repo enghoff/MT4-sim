@@ -8,6 +8,7 @@ has several pixels per code cell.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -49,11 +50,33 @@ def quiet_zone_fraction() -> float:
 
 
 def write_tag_textures(out_dir: Path) -> dict[int, Path]:
-    """Write one PNG per rig marker. Returns tag id -> path."""
+    """Write one PNG per rig marker. Returns tag id -> path.
+
+    The filename carries a hash of the image, which is not decoration. Kit
+    caches textures by path and does not notice the file changing underneath
+    it: change which tags the rig carries, and the renderer will happily draw
+    the *previous* tag from a path whose contents have since been rewritten --
+    a scene that is correct in USD, correct on disk, and wrong in the frame,
+    which is exactly as confusing to debug as it sounds. A path that can only
+    ever hold one image makes that impossible.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+
     written: dict[int, Path] = {}
     for marker in MARKERS:
-        path = out_dir / f"aruco_{MARKER_DICT}_{marker.tag_id}.png"
-        cv2.imwrite(str(path), tag_image(marker.tag_id))
+        ok, buffer = cv2.imencode(".png", tag_image(marker.tag_id))
+        if not ok:
+            raise RuntimeError(f"could not encode tag {marker.tag_id}")
+        data = buffer.tobytes()
+        digest = hashlib.sha1(data).hexdigest()[:10]
+        path = out_dir / f"aruco_{MARKER_DICT}_{marker.tag_id}_{digest}.png"
+        path.write_bytes(data)
         written[marker.tag_id] = path
+
+    # Tags from an earlier layout would otherwise pile up unreferenced.
+    keep = set(written.values())
+    for stale in out_dir.glob(f"aruco_{MARKER_DICT}_*.png"):
+        if stale not in keep:
+            stale.unlink()
+
     return written

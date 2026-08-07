@@ -83,6 +83,7 @@ class SimArm:
         self._arm_dofs = [names.index(n) for n in ARM_JOINT_NAMES]
         self._finger_dofs = [names.index(n) for n in FINGER_JOINT_NAMES]
         self._gripper_s = float(GRIPPER_S_CLOSED)
+        self._commanded: JointAnglesDeg | None = None
 
     # -- commanding -------------------------------------------------------
 
@@ -114,6 +115,7 @@ class SimArm:
             self._art.set_joint_velocities(
                 np.zeros(len(self._arm_dofs)), joint_indices=self._arm_dofs
             )
+        self._commanded = q
         self._drive(positions, self._arm_dofs)
 
     def set_gripper_s(self, s: float, *, teleport: bool = False) -> None:
@@ -172,6 +174,22 @@ class SimArm:
         q = model_from_urdf(self.urdf_joint_positions())
         tcp = fk_tcp(q)
         return ArmState(q, (tcp.x, tcp.y, tcp.z), self._gripper_s)
+
+    def tracking_error_deg(self) -> float | None:
+        """How far the joints are from the last pose they were commanded to.
+
+        A stepper is where its pulse train left it; a position drive is still
+        catching up. Anything that wants "the move has finished" to mean the
+        same thing here as on the bench has to wait for this to fall.
+        Returns None before the first command.
+        """
+        if self._commanded is None:
+            return None
+        measured = model_from_urdf(self.urdf_joint_positions())
+        return max(
+            abs(getattr(self._commanded, name) - getattr(measured, name))
+            for name in ("j1", "j2", "j3", "j4")
+        )
 
     def measured_tcp_mm(self) -> tuple[float, float, float]:
         """Where the simulated TCP frame actually is, in robot mm.

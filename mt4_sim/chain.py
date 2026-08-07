@@ -39,7 +39,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from mt4_sim import mt4_repo  # noqa: F401  (sys.path bootstrap)
+from mt4_sim import calibration, mt4_repo  # noqa: F401  (sys.path bootstrap)
 
 from mt4_jog.joints import (
     GRIPPER_S_CLOSED,
@@ -66,11 +66,13 @@ from mt4_jog.kinematics import (
 
 MM = 0.001
 
-# Desk surface in the arm's home-angle frame. Measured on the real rig
-# 2026-08-04 by a camera-tracked descent; `mt4_jog.joints.GROUND_Z_MM` (115) is
-# the firmware's soft floor, deliberately ~5mm under the surface so a pick at
+# Desk surface in the arm's home-angle frame, read from the live rig's
+# calibration rather than restated: `Calibration.table_z` is both the table
+# surface's Z and the TCP Z that grips a cube sitting on it, measured by
+# touching the tags with the TCP. `mt4_jog.joints.GROUND_Z_MM` (115) is the
+# firmware's soft floor, deliberately a few mm under the surface so a pick at
 # table_z presses into the desk instead of stopping short of it.
-DESK_Z_MM = 120.0
+DESK_Z_MM = calibration.table_z_mm()
 
 # Jaw span model from `mt4_vision.calib` (grip_span_s_at_zero_mm /
 # grip_span_s_per_mm, measured on the real gripper): span_mm = (212.3 - S) /

@@ -94,10 +94,45 @@ def _quad(stage, path: str, side_m: float):
     mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
     mesh.CreateNormalsAttr([Gf.Vec3f(0, 0, 1)] * 4)
     mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+    # A tag pulled in at the corners by a subdivision surface is a tag whose
+    # code cells are the wrong size.
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
     uvs = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
         "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
     )
     uvs.Set([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(1, 1), Gf.Vec2f(0, 1)])
+    return mesh
+
+
+def _slab(stage, path: str, outline_mm, top_z_mm: float, thickness_mm: float):
+    """A convex outline in XY, extruded down into a flat-topped slab.
+
+    The desk is not a box: its measured back edge is skew to Y and it has a bay
+    cut out for the arm, so it is authored as a mesh. Each piece is convex by
+    construction, which is what lets the collider be an exact convex hull.
+    """
+    top, bottom = top_z_mm * MM, (top_z_mm - thickness_mm) * MM
+    count = len(outline_mm)
+    points = [Gf.Vec3f(x * MM, y * MM, top) for x, y in outline_mm]
+    points += [Gf.Vec3f(x * MM, y * MM, bottom) for x, y in outline_mm]
+
+    # The outline runs counter-clockwise seen from above, so the top face takes
+    # it as given, the bottom face reversed, and each side wall closes the pair.
+    counts = [count, count] + [4] * count
+    indices = list(range(count)) + list(range(2 * count - 1, count - 1, -1))
+    for i in range(count):
+        j = (i + 1) % count
+        indices += [i, count + i, count + j, j]
+
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    mesh.CreatePointsAttr(points)
+    mesh.CreateFaceVertexCountsAttr(counts)
+    mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+
+    prim = mesh.GetPrim()
+    UsdPhysics.CollisionAPI.Apply(prim)
+    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr(UsdPhysics.Tokens.convexHull)
     return mesh
 
 
@@ -135,30 +170,53 @@ def add_lighting(stage) -> None:
         xform.AddRotateXYZOp().Set(Gf.Vec3f(-55.0, 0.0, angle_deg))
 
 
+def _static_box(stage, path: str, size_m, centre_m, material):
+    prim = _box(stage, path, size_m, centre_m)
+    UsdPhysics.CollisionAPI.Apply(prim.GetPrim())
+    _bind(prim.GetPrim(), material)
+    return prim
+
+
 def add_desk(stage) -> None:
-    x0, x1 = (v * MM for v in rig.DESK_X_MM)
-    y0, y1 = (v * MM for v in rig.DESK_Y_MM)
-    thickness = rig.DESK_THICKNESS_MM * MM
-    top = DESK_Z_MM * MM
+    """The work surface, and the wall behind it.
 
-    desk = _box(
-        stage,
-        f"{WORLD}/Desk",
-        (x1 - x0, y1 - y0, thickness),
-        ((x0 + x1) / 2.0, (y0 + y1) / 2.0, top - thickness / 2.0),
-    )
-    UsdPhysics.CollisionAPI.Apply(desk.GetPrim())
-    _bind(desk.GetPrim(), _preview_material(stage, f"{WORLD}/Looks/Desk", rig.DESK_RGB, 0.8))
+    One surface, top at ``DESK_Z_MM``. The arm is mounted at its back edge with
+    everything below the shoulder under the wood, so the surface carries on
+    past the arm rather than starting in front of it -- which is how
+    ``calibrate_table_edge.py`` came to measure that edge running *behind* the
+    J1 axis. The bay is what keeps that arrangement legal: the rotating column
+    sweeps a 67mm radius, and a tabletop through it would be a static collider
+    inside the articulation's swept volume, jamming the base yaw solid.
+    """
+    wood = _preview_material(stage, f"{WORLD}/Looks/Desk", rig.DESK_RGB, 0.8)
+    UsdGeom.Scope.Define(stage, f"{WORLD}/Desk")
 
-    height = rig.WALL_HEIGHT_MM * MM
-    wall = _box(
+    back = rig.desk_back_x_mm
+    front, side = rig.DESK_FRONT_X_MM, rig.DESK_HALF_Y_MM
+    bay_x, bay_y = rig.DESK_BAY_FRONT_X_MM, rig.DESK_BAY_HALF_Y_MM
+
+    outlines = {
+        "Left": ((back(-side), -side), (front, -side), (front, -bay_y), (back(-bay_y), -bay_y)),
+        "Right": ((back(bay_y), bay_y), (front, bay_y), (front, side), (back(side), side)),
+        "Middle": ((bay_x, -bay_y), (front, -bay_y), (front, bay_y), (bay_x, bay_y)),
+    }
+    for name, outline in outlines.items():
+        piece = _slab(
+            stage, f"{WORLD}/Desk/{name}", outline, DESK_Z_MM, rig.DESK_THICKNESS_MM
+        )
+        _bind(piece.GetPrim(), wood)
+
+    _static_box(
         stage,
         f"{WORLD}/Wall",
-        (0.01, y1 - y0, height),
-        (rig.WALL_X_MM * MM, (y0 + y1) / 2.0, top + height / 2.0),
+        (
+            0.01,
+            2 * rig.WALL_HALF_Y_MM * MM,
+            (rig.WALL_TOP_Z_MM - rig.WALL_BOTTOM_Z_MM) * MM,
+        ),
+        (rig.WALL_X_MM * MM, 0.0, (rig.WALL_TOP_Z_MM + rig.WALL_BOTTOM_Z_MM) * MM / 2.0),
+        _preview_material(stage, f"{WORLD}/Looks/Wall", rig.WALL_RGB, 0.9),
     )
-    UsdPhysics.CollisionAPI.Apply(wall.GetPrim())
-    _bind(wall.GetPrim(), _preview_material(stage, f"{WORLD}/Looks/Wall", rig.WALL_RGB, 0.9))
 
 
 def add_markers(stage, texture_dir: Path) -> None:

@@ -72,6 +72,13 @@ HEAD_TILT_TOLERANCE_DEG = 0.2
 UNEXPLAINED_TOLERANCE_MM = 0.02
 DRIVE_TOLERANCE_DEG = 0.5
 
+# A tag read out of a simulated frame with the real rig's calibration file
+# cannot land exactly: the sim camera is a pinhole and the rig's is not. The
+# camera fit's own residual is ~14mm, so this is that plus room for detection
+# noise -- tight enough that a misplaced or mis-turned tag still fails.
+TAG_PLACEMENT_TOLERANCE_MM = 35.0
+TAG_YAW_TOLERANCE_DEG = 5.0
+
 
 def step(world: World, count: int) -> None:
     for _ in range(count):
@@ -202,6 +209,7 @@ def render_and_detect(world: World, arm: SimArm) -> list[str]:
     print(f"  ArUco expected {expected}")
     print(f"  ArUco decoded  {found}")
 
+    detected = {int(i): c.reshape(4, 2) for i, c in zip(ids.flatten(), corners)} if ids is not None else {}
     if corners:
         cv2.aruco.drawDetectedMarkers(bgr, corners, ids)
     cv2.imwrite(str(OUT / "scene_camera_tags.png"), bgr)
@@ -209,11 +217,70 @@ def render_and_detect(world: World, arm: SimArm) -> list[str]:
     missing = [t for t in expected if t not in found]
     if missing:
         failures.append(f"tags {missing} did not decode from the simulated camera")
+    # A tag that decodes as a *different* tag is worse than one that does not
+    # decode: it silently moves a calibration point across the desk.
+    wrong = sorted({t for t in found if t not in expected})
+    if wrong:
+        failures.append(f"the simulated camera decoded tags {wrong}, which are not on the desk")
 
+    failures += check_tags_through_calibration(detected)
     # Tag drawing mutated bgr, so detection runs on a clean copy.
     return failures + check_cube_detection(
         cv2.cvtColor(np.asarray(frame, dtype=np.uint8)[..., :3], cv2.COLOR_RGB2BGR)
     )
+
+
+def check_tags_through_calibration(detected: dict) -> list[str]:
+    """Read the simulated frame with the *real* rig's calibration file.
+
+    The tags decoding only proves they are legible. This proves the sim is in
+    the same place as the rig it copies: every tag's pixels are pushed through
+    ``vision_calibration.json``'s own homography, exactly as the live stack
+    would, and compared against where that same file says the tag is taped.
+
+    The residual is not zero and cannot be. The real lens has barrel distortion
+    that a pinhole cannot express, so a sim camera pinned at the measured lens
+    position reproduces the rig's table map to about 20px -- ``rig.SCENE_CAMERA``
+    reports that fit. Anything much past it is a placement error, not optics.
+    """
+    from mt4_sim.calibration import CALIBRATION
+
+    failures = []
+    print("\n-- simulated tags, read through the live vision_calibration.json --")
+    print(
+        f"  {'tag':>4}  {'calibration says':>22}  {'sim frame reads':>22}  "
+        f"{'off':>7}  {'yaw err':>8}  {'side':>7}"
+    )
+    for placement in rig.MARKERS:
+        seen = detected.get(placement.tag_id)
+        if seen is None:
+            continue
+        on_table = np.array([CALIBRATION.pixel_to_robot(float(u), float(v)) for u, v in seen])
+        centre = on_table.mean(axis=0)
+        edge = on_table[1] - on_table[0]
+        yaw = math.degrees(math.atan2(edge[1], edge[0]))
+        side = float(
+            np.mean([np.linalg.norm(on_table[(i + 1) % 4] - on_table[i]) for i in range(4)])
+        )
+        off = math.dist(centre, (placement.x_mm, placement.y_mm))
+        yaw_error = (yaw - placement.yaw_deg + 180.0) % 360.0 - 180.0
+        bad = off > TAG_PLACEMENT_TOLERANCE_MM or abs(yaw_error) > TAG_YAW_TOLERANCE_DEG
+        print(
+            f"  {placement.tag_id:>4}  ({placement.x_mm:8.1f},{placement.y_mm:8.1f})  "
+            f"({centre[0]:8.1f},{centre[1]:8.1f})  {off:6.1f}mm  {yaw_error:7.2f}d  "
+            f"{side:6.1f}mm{'  <-- FAIL' if bad else ''}"
+        )
+        if off > TAG_PLACEMENT_TOLERANCE_MM:
+            failures.append(
+                f"tag {placement.tag_id} reads {off:.1f}mm from where the calibration "
+                f"says it is taped -- past what the pinhole/lens mismatch explains"
+            )
+        if abs(yaw_error) > TAG_YAW_TOLERANCE_DEG:
+            failures.append(
+                f"tag {placement.tag_id} is laid at {yaw_error:.1f} deg from the "
+                f"orientation the rig's own corners record"
+            )
+    return failures
 
 
 def check_cube_detection(bgr) -> list[str]:
@@ -258,18 +325,19 @@ def check_cube_detection(bgr) -> list[str]:
 def render_preview(world: World) -> None:
     """A third-person view, so the rig can be eyeballed without opening the GUI.
 
-    Placed in front of the arm on the +X side: the wall sits behind the base, so
-    anything looking from -X photographs the back of the wall.
+    Kept above the work surface and out past its front corner: the wall sits
+    just behind the arm, so anything looking from behind sees the back of it.
     """
     from mt4_sim.scene import define_camera
+    from mt4_sim.chain import DESK_Z_MM as desk
 
     define_camera(
         world.stage,
         "/World/PreviewCamera",
-        eye_mm=(700.0, -520.0, 480.0),
-        target_mm=(180.0, 0.0, 160.0),
+        eye_mm=(610.0, -470.0, desk + 340.0),
+        target_mm=(130.0, -10.0, desk + 10.0),
         resolution=(1600, 1000),
-        fov_deg=48.0,
+        fov_deg=55.0,
     )
 
     from isaacsim.sensors.camera import Camera
@@ -289,17 +357,25 @@ def render_preview(world: World) -> None:
 
 
 def report_camera_geometry() -> None:
-    """The simulated camera's nadir and height, against the real rig's measured."""
-    eye = rig.CAM_POSITION_MM
-    print("\n-- scene camera geometry vs the real rig ----------------------------")
+    """Where the sim's lens is, and how well it stands in for the rig's."""
+    from mt4_sim.calibration import CALIB_PATH
+
+    cam = rig.SCENE_CAMERA
+    eye = cam.position_mm
+    print("\n-- scene camera vs the rig's own calibration -----------------------")
+    print(f"  read from {CALIB_PATH}")
     print(
-        f"  sim  nadir ({eye[0]:6.1f}, {eye[1]:6.1f})  "
-        f"lens {eye[2] - rig.DESK_TOP_Z_MM:5.1f}mm above the desk"
+        f"  lens at nadir ({eye[0]:6.1f}, {eye[1]:6.1f}), "
+        f"{eye[2] - rig.DESK_TOP_Z_MM:5.1f}mm above the table -- as measured"
     )
     print(
-        f"  real nadir ({rig.REAL_CAM_NADIR_XY_MM[0]:6.1f}, "
-        f"{rig.REAL_CAM_NADIR_XY_MM[1]:6.1f})  "
-        f"lens {rig.REAL_CAM_HEIGHT_ABOVE_DESK_MM:5.1f}mm above the desk"
+        f"  aimed at ({cam.target_mm[0]:6.1f}, {cam.target_mm[1]:6.1f}), "
+        f"{cam.horizontal_fov_deg:5.2f} deg across {cam.resolution[0]}x{cam.resolution[1]}"
+    )
+    print(
+        f"  reproduces the calibration's pixel<->table map to "
+        f"{cam.residual_px:.1f} px rms ({cam.residual_mm:.1f} mm), which is the "
+        f"real lens's distortion"
     )
 
 
