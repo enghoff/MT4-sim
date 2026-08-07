@@ -40,10 +40,11 @@ DESK_BACK_SLOPE, DESK_BACK_X_MM = calibration.desk_back_edge()
 DESK_FRONT_X_MM = 560.0
 DESK_HALF_Y_MM = 600.0
 
-# The bay the arm sits in, cut back from the desk's rear edge. The rotating
-# column sweeps a 67mm radius about the J1 axis and the static base is 140mm
-# across, so the surface has to stop clear of both or the base yaw jams solid
-# against a static collider.
+# The bay the arm sits in, cut back from the desk's rear edge. Only the *static*
+# base needs clearing: per the CAD its 110x110 pedestal stands 20mm forward of
+# the J1 axis on a 110x130 foot plate, so it reaches x = 75 and |y| = 65. The
+# rotating body sweeps wider than that -- 73mm at the yoke, 94mm at the shoulder
+# steppers -- but its underside is 54mm up, so it never comes near the wood.
 DESK_BAY_FRONT_X_MM = 82.0
 DESK_BAY_HALF_Y_MM = 78.0
 

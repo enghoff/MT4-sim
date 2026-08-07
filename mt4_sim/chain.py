@@ -74,18 +74,33 @@ MM = 0.001
 # which all three of the firmware's numbers make sense at once:
 #
 #   CENCER_HEIGHT = 140    the shoulder pivot, 140 mm above the desk it stands on
-#   table_z       = 122    the TCP height whose tong tips are on that desk
-#   GROUND_Z_MM   = 115    a floor 7 mm of tong-tip *below* the wood, which is
-#                          what a floor "a few mm under the table" should be
+#   table_z       = 122    the TCP height that grips something lying on the desk
+#   GROUND_Z_MM   = 115    the TCP height at which the tong tips touch the wood,
+#                          i.e. the floor -- which is what a floor should be
 #
 # The alternative -- wood at z = 122 with the arm's base buried beneath it --
 # is what this modelled before, and it put the gripper body exactly on a 20 mm
 # cube's top face on every pick.
 TCP_GRIP_Z_MM = calibration.table_z_mm()
 DESK_Z_MM = calibration.desk_surface_z_mm()
-# How far the tongs reach below the TCP. Not a free parameter: it is the whole
-# distance between the two planes above.
-TONG_REACH_MM = TCP_GRIP_Z_MM - DESK_Z_MM
+
+# The gripper's own height: J4 (the wrist roll axis, whose origin *is* the TCP)
+# down to the tips of the tongs. Measured on the real gripper -- the CAD is no
+# help here, because the STEP assembly carries the soft gripper as named parts
+# with no B-rep attached.
+#
+# This is not free either, and the firmware pins it: `GROUND_Z_MM` = 115 is the
+# lowest TCP the host will command, and a floor is the height at which the thing
+# hanging lowest touches the wood. Tongs 115 mm long put the tips exactly on the
+# desk at TCP = 115, so the firmware's floor and the gripper's height are the
+# same number for the same reason.
+TONG_REACH_MM = 115.0
+# What that leaves at grip height: the tips ride this far above the wood while
+# gripping, straddling the lower 13 mm of a 20 mm cube. It used to be 0 -- the
+# tongs were sized as `TCP_GRIP_Z_MM - DESK_Z_MM` = 122, on the assumption that
+# they reached exactly to the wood -- and tips resting on the desk are what
+# `GROUND_Z_MM` then had to be read as driving 7 mm *under* it.
+TONG_CLEARANCE_MM = TCP_GRIP_Z_MM - DESK_Z_MM - TONG_REACH_MM
 
 # Jaw span model from `mt4_vision.calib` (grip_span_s_at_zero_mm /
 # grip_span_s_per_mm, measured on the real gripper): span_mm = (212.3 - S) /
@@ -287,6 +302,62 @@ FINGER_MAX_SPEED_M_S = 0.15
 FINGER_STATIC_FRICTION = 1.2
 FINGER_DYNAMIC_FRICTION = 1.1
 
+# --------------------------------------------------------------------------
+# The jaws are coupled to each other
+# --------------------------------------------------------------------------
+#
+# The real gripper is a scissor mechanism: one servo drives both blades through
+# a symmetric linkage, so the blades cannot move independently and their midpoint
+# is pinned to J4. A cube the jaws close on is therefore *centred* on the TCP --
+# the mechanism pushes it there -- rather than being walked across the gripper by
+# whichever blade reaches it first.
+#
+# Expressed on the two prismatic axes, the whole constraint is
+#
+#     q_left - q_right = 0
+#
+# because both joints have their origin at the TCP and both count positive
+# outward. That is what a PhysX **fixed tendon** says: axes with gearings +1 and
+# -1 and a rest length of zero, pulled together at ``FINGER_COUPLING_STIFFNESS``.
+#
+# Two things about this are easy to get wrong, both measured:
+#
+# * ``PhysxMimicJointAPI`` is the obvious tool and is present in the schema, but
+#   this runtime applies it and then ignores it. Told left = 0 and right = 24.5
+#   the jaws go to exactly 0.00 / 24.50 with the mimic applied, the same as with
+#   no constraint at all -- for the ``transY`` and the ``linear`` axis token
+#   alike.
+# * A fixed tendon spans the **subtree** of the joint it is rooted on. Rooted on
+#   one jaw it cannot reach the other, because the two finger joints are
+#   siblings: that arrangement drags the rooted jaw to the rest length and leaves
+#   the other exactly where it was told. It has to be rooted on a common
+#   ancestor -- ``j4_wrist_roll`` -- carrying gearing 0 so the wrist itself
+#   contributes nothing to the tendon's length.
+#
+# **The tendon cannot be made rigid at 60 Hz, and trying costs the grip.** A
+# spring this stiff on an axis carrying FINGER_ARMATURE_KG rings at
+# sqrt(k/m) rad/s, which the step has to resolve; at 1e6 that is w*dt = 43 and
+# the jaws buzz. The buzz does not show up in the close -- it produces the
+# *best* alignment of anything tried, 0.04-0.13 mm of asymmetry -- it shows up
+# in the lift, where it shakes the cube straight back out. Measured over
+# check_grip.py's set, jaw asymmetry after the close against what survives the
+# carry:
+#
+#     none        0.22 / 1.63 / 1.27 mm   all lift
+#     3e4, c=400  0.08 / 0.81 / 0.38 mm   all lift
+#     1e5, c=2e3  0.10 / 0.84 / 0.64 mm   all lift  (overdamped to stay stable)
+#     1e6, c=1e3  0.04 / 0.13 / 0.08 mm   **3 of 6 dropped the cube**
+#
+# So this halves the asymmetry rather than abolishing it, and that is the whole
+# of what a 60 Hz step will give. Note the damping is not free either: it is what
+# keeps the stiffer settings stable, but it also drags on the very motion that
+# equalises the jaws, which is why 1e5 with 8x critical damping aligns *worse*
+# than 3e4 with 2x. 3e4 is the best of the stable pairs on every case.
+FINGER_COUPLING_STIFFNESS = 3.0e4
+FINGER_COUPLING_DAMPING = 400.0
+# The tendon's instance name on each joint prim.
+FINGER_COUPLING_NAME = "jaws"
+
 
 __all__ = [
     "ARM_JOINT_NAMES",
@@ -294,8 +365,12 @@ __all__ = [
     "CENCER_OFFSET",
     "DESK_Z_MM",
     "TCP_GRIP_Z_MM",
+    "TONG_CLEARANCE_MM",
     "TONG_REACH_MM",
     "FINGER_ARMATURE_KG",
+    "FINGER_COUPLING_DAMPING",
+    "FINGER_COUPLING_NAME",
+    "FINGER_COUPLING_STIFFNESS",
     "FINGER_DAMPING_N_S_PER_M",
     "FINGER_DYNAMIC_FRICTION",
     "FINGER_EFFORT_N",

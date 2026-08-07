@@ -24,6 +24,9 @@ from mt4_sim.chain import (
     DESK_Z_MM,
     TCP_GRIP_Z_MM,
     FINGER_ARMATURE_KG,
+    FINGER_COUPLING_DAMPING,
+    FINGER_COUPLING_NAME,
+    FINGER_COUPLING_STIFFNESS,
     FINGER_DAMPING_N_S_PER_M,
     FINGER_DYNAMIC_FRICTION,
     FINGER_EFFORT_N,
@@ -313,6 +316,46 @@ def configure_finger_joints(stage, *, prim_path: str = ARM_PRIM_PATH) -> int:
     return n
 
 
+def couple_finger_joints(stage, *, prim_path: str = ARM_PRIM_PATH) -> str:
+    """Tie the jaws to each other so their midpoint stays on the TCP.
+
+    A fixed tendon over the two prismatic axes with gearings +1 / -1 and a rest
+    length of zero, standing in for the real gripper's scissor linkage. See
+    ``mt4_sim.chain`` for why it is rooted on the wrist rather than on a jaw, and
+    for the mimic-joint route that does not work here.
+
+    Build-time only: PhysX reads tendons when it creates the articulation, so
+    applying this to a stage that is already simulating does nothing. Returns the
+    wrist joint path it rooted on.
+    """
+    from pxr import PhysxSchema
+
+    root_path = f"{prim_path}/Physics/{ARM_JOINT_NAMES[-1]}"
+    root_prim = stage.GetPrimAtPath(root_path)
+    if not root_prim.IsValid():
+        raise RuntimeError(f"no wrist joint prim at {root_path} to root the jaw tendon on")
+
+    root = PhysxSchema.PhysxTendonAxisRootAPI.Apply(root_prim, FINGER_COUPLING_NAME)
+    root.CreateStiffnessAttr(FINGER_COUPLING_STIFFNESS)
+    root.CreateDampingAttr(FINGER_COUPLING_DAMPING)
+    root.CreateRestLengthAttr(0.0)
+    # The jaws' own prismatic stops already bound the opening; a tendon limit on
+    # top of them would fight the drive at the ends of its travel.
+    root.CreateLimitStiffnessAttr(0.0)
+    # Gearing 0: the wrist is here to be a common ancestor of both jaws, not to
+    # take part in the sum the tendon holds at zero.
+    PhysxSchema.PhysxTendonAxisAPI(root_prim, FINGER_COUPLING_NAME).CreateGearingAttr([0.0])
+
+    for name, gearing in zip(FINGER_JOINT_NAMES, (1.0, -1.0)):
+        prim = stage.GetPrimAtPath(f"{prim_path}/Physics/{name}")
+        if not prim.IsValid():
+            raise RuntimeError(f"no finger joint prim at {prim_path}/Physics/{name}")
+        PhysxSchema.PhysxTendonAxisAPI.Apply(prim, FINGER_COUPLING_NAME).CreateGearingAttr(
+            [gearing]
+        )
+    return root_path
+
+
 def define_physics_material(
     stage, path: str, *, static: float, dynamic: float, restitution: float = 0.0
 ):
@@ -423,10 +466,13 @@ def desk_z_mm() -> float:
 
 
 def tcp_above_desk_mm(state: ArmState) -> float:
-    """How far the TCP is above the height at which the tongs reach the wood.
+    """How far the TCP is above the height that grips something on the desk.
 
-    Zero means the tong tips are on the desk; this is the number a caller
-    thinking in "clearance above the table" wants, not the TCP's raw Z.
+    Zero means the arm is at ``TCP_GRIP_Z_MM``, where the tong tips ride
+    ``TONG_CLEARANCE_MM`` clear of the wood and straddle a cube lying on it.
+    This is the number a caller thinking in "clearance above the table" wants,
+    not the TCP's raw Z. The tips reach the wood ``TONG_CLEARANCE_MM`` lower
+    still, at ``GROUND_Z_MM``.
     """
     return state.tcp_mm[2] - TCP_GRIP_Z_MM
 

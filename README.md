@@ -108,8 +108,9 @@ base stands on, so it is where the desk is. The MT4 sits *on* the desk.
 
 **`Calibration.table_z` = 122 mm is not the desk.** It is a **TCP** height: the
 Z the arm is commanded to in order to grip something lying on the table,
-measured by touching the tags. The gripper's tongs hang below the TCP, and they
-are exactly long enough that their tips reach the wood when the TCP is at 122.
+measured by touching the tags. The gripper's tongs hang 115 mm below the TCP, so
+at a TCP of 122 their tips clear the wood by 7 mm and straddle the lower two
+thirds of a 20 mm cube.
 
 That one distinction is what makes three separate firmware numbers agree at
 once, where before only two could:
@@ -117,8 +118,13 @@ once, where before only two could:
 | | | |
 |---|---|---|
 | `CENCER_HEIGHT` | 140 | the shoulder pivot, 140 mm above the desk it stands on |
-| `Calibration.table_z` | 122 | the TCP height whose tong tips are on that desk |
-| `GROUND_Z_MM` | 115 | a floor 7 mm of tong-tip *below* the wood — which is what a floor "a few mm under the table" ought to mean |
+| `Calibration.table_z` | 122 | the TCP height that grips something lying on that desk |
+| `GROUND_Z_MM` | 115 | the TCP height at which the tong tips touch the wood — a floor, which is exactly what a floor should be |
+
+The last row is the one that pins the gripper's length. A floor is the height at
+which the lowest thing on the arm reaches the ground; tongs 115 mm long put the
+tips on the wood at TCP = 115, so the firmware's floor and the gripper's measured
+height are the same number for the same reason.
 
 and it is consistent with `calibrate_table_edge.py` measuring the desk's back
 edge at x ≈ −76, behind the J1 axis: the desk runs *past* the arm, because the
@@ -131,7 +137,7 @@ through it, but it keeps the tabletop from being a static collider coincident
 with the base's own foot.
 
 Knobs: `calibration.desk_surface_z_mm()` (the wood), `chain.TCP_GRIP_Z_MM` (read
-from the calibration), `chain.TONG_REACH_MM` (the distance between them),
+from the calibration), `chain.TONG_REACH_MM` (the gripper's measured height),
 `rig.DESK_FRONT_X_MM` / `rig.DESK_HALF_Y_MM` for how far the surface runs.
 
 ### What the previous arrangement broke
@@ -147,22 +153,29 @@ corners at a 27 mm gap.
 With full-length tongs the same close turns it **20.0° of 20** and ends
 face-gripped at 19.6 mm. `check_grip.py --yaw-error` is the test.
 
-### The tongs are as long as the geometry requires
+### The tongs are 115 mm because the gripper is
 
 `HEAD_HEIGHT` = 14.43 mm is the whole drop from the wrist pivot to the pads, so
 the head plate and the servo housing have to live above the TCP — but the tongs
-themselves hang the full `TONG_REACH_MM` below it, down to the wood. That is
-what lets the gripper reach a cube on the table without any part of the head
-touching it, and it is what real jaws that clear a tall object look like.
+themselves hang `TONG_REACH_MM` = 115 below it. That is what lets the gripper
+reach a cube on the table without any part of the head touching it, and it is
+what real jaws that clear a tall object look like.
 
-Two consequences worth knowing:
+115 is measured off the real gripper, not derived. The CAD cannot supply it: the
+STEP assembly carries the soft gripper (`两只柔爪2022`) as named parts with no
+B-rep attached, so `tools/step_assembly.py` finds the mount and the J4 stepper
+but nothing below them.
 
-- **The tong tips sit on the wood at grip height.** They do not drag: a free
-  close there still reaches 0.01 mm.
-- **`GROUND_Z_MM` = 115 drives the tips 7 mm into the desk, and that jams the
-  jaws solid** — measured, they will not close at all. Faithful (the real jaws
-  would jam too), but it means a host that floors the Z and then grips gets
-  nothing.
+The number this replaces was 122 — `TCP_GRIP_Z_MM - DESK_Z_MM`, on the
+assumption that the tongs reached exactly to the wood. Seven millimetres, and it
+was the wrong seven:
+
+- **The tips clear the wood by 7 mm at grip height**, straddling the lower two
+  thirds of a 20 mm cube, rather than resting on the desk.
+- **`GROUND_Z_MM` = 115 is now a floor and nothing stranger.** At 122-long tongs
+  it drove the tips 7 mm *into* the desk, which jammed the jaws solid — measured,
+  they would not close at all. A host that floored the Z and then gripped got
+  nothing. At 115 the tips land exactly on the wood.
 
 ## The CAD independently confirms the kinematics
 
@@ -191,6 +204,32 @@ The STEP's own assembly transforms are all identity — it is a flattened HOOPS
 export with every part's geometry already in the assembly root frame — so the
 transforms are useless but the geometry is authoritative.
 
+### …and it corrects the two bodies J1 joins
+
+The kinematics were right long before the *shapes* were. The base and the
+rotating column were sketched to plausible proportions, and read far taller and
+blockier than the real machine. The CAD says:
+
+| | model was | CAD (above the desk) |
+|---|---|---|
+| foot plate | 140 × 120, 8 tall | **110 × 130**, 5 tall |
+| pedestal | 104 × 92, running the full 8 → 76 | **110 × 110, stopping at 54** |
+| J1 shroud | — | **85 × 72**, 54 → 75 |
+| yoke | 96 × 84 to 142, plus a 62 × 64 cap to 162 | **106 × 64**, 76 → 160 |
+| shoulder steppers | absent | **two 42 × 84 × 42**, 87 → 129, ±92 wide |
+| base centre | on the J1 axis | **20 mm forward of it** |
+
+Total height was close all along — 76 mm of base against the CAD's 75. What made
+it read tall was the missing **step at 54 mm**: the real pedestal is a squat
+110 × 110 box that necks down to a narrow shroud, where the model ran one
+104 × 92 block the whole way up. The two shoulder steppers are the other half of
+it — at 184 mm tip to tip they are the widest thing on the machine, and drawing
+them as nothing left the column a plain tower.
+
+Both bodies rotate or stand clear of the wood (the rotating body's underside is
+54 mm up), so none of this is load-bearing for collision; it is what the arm
+looks like, and `rig.DESK_BAY_*` now has the real footprint to clear.
+
 ### Real meshes are the obvious next step
 
 The arm currently renders as boxes sized from the CAD bounding boxes:
@@ -210,7 +249,8 @@ repo at all: `mt4_sim/calibration.py` reads the live rig's
 camera, the same way `mt4_sim/chain.py` reads the firmware's kinematics. A
 recalibration on the real rig is one `build_scene.py` away from being true here.
 
-- **Work surface** — wood-toned, top face at z = 122 (`Calibration.table_z`),
+- **Work surface** — wood-toned, top face at z = 0 (the plane the arm's own base
+  stands on; `Calibration.table_z` = 122 is a TCP height, see *Frames* above),
   running from the measured back edge out past the camera's frame, with a bay for
   the arm. The tone is not decoration: the live `mt4_vision.detect` has no
   "orange" cube colour precisely because the wood table and red cubes' shaded
@@ -267,27 +307,71 @@ just jam on its corners, and none of them is the grip force:
   20 g blade at 60 Hz that is 1.25 m/s, and the jaws chatter instead of pushing.
   Armature is the servo's reflected rotor inertia, which is real and dominates
   the blade's own mass; 0.30 kg makes the contact quiet enough to do work.
-- **Jaw speed** (`chain.FINGER_MAX_SPEED_M_S`). What squares a cube up is the
-  *momentum* of the closing jaw, not the static couple. Drop the ceiling to
-  0.12 m/s and a 20°-off cube stops squaring entirely.
+- **Jaw speed** (`chain.FINGER_MAX_SPEED_M_S`) *used* to matter, and no longer
+  does. With the short jaws the only thing that could turn a misaligned cube was
+  the *momentum* of a fast blade, and dropping the ceiling to 0.12 m/s stopped
+  the squaring entirely. Full-length tongs turn it with a static couple instead:
+  20.0° of 20 at 0.5 m/s, 19.9° at 0.1.
 
-Measured on a cube 20° off square: it now turns 20.1° of 20 and ends
-face-gripped at 19.6 mm.
+Measured on a cube 20° off square: it turns 20.0° of 20 and ends face-gripped at
+19.77 mm, 0.63 mm off the TCP.
 
-**What is still wrong: the jaws are not coupled to each other.** The real
-gripper is one servo driving both blades through a symmetric linkage, so a cube
-it touches is centred between them. Here they are two independent prismatic
-drives, so whichever reaches the cube first walks it across the gripper — a
-grasp can finish with the cube 7–11 mm off the TCP, and one badly mis-aimed case
-in `check_grip.py`'s set finishes with the far jaw at its open stop and the cube
-merely leaning on it.
+### The jaws are coupled, as far as 60 Hz allows
 
-`PhysxMimicJointAPI` is the right fix and is present in the schema, but this
-runtime applies it and then ignores it. The direct test: with the mimic applied,
-drive one jaw to 0 mm and the other to 24.5 mm and they go **exactly** there —
-0.00 / 24.50, the same as with no constraint at all. Software coupling is not a
-substitute: projecting the pair back onto L = R would drive the near jaw
-straight into the cube it is already touching.
+The real gripper is a scissor: one servo drives both blades through a symmetric
+linkage, so the blades cannot move independently and **their midpoint is pinned
+to J4**. A cube the jaws close on is pushed to the centre rather than walked
+across the gripper by whichever blade reaches it first. On the two prismatic
+axes that whole constraint is `q_left - q_right = 0`, because both joints have
+their origin at the TCP and both count positive outward.
+
+It is authored as a PhysX **fixed tendon** over the two axes — gearings +1 and
+−1, rest length zero — by `arm.couple_finger_joints`, at scene-build time
+because PhysX reads tendons when it creates the articulation.
+
+Two things about this are easy to get wrong, both measured rather than assumed:
+
+- **`PhysxMimicJointAPI` is applied and then ignored by this runtime.** It is the
+  obvious tool and it is present in the schema. Told left = 0 and right = 24.5,
+  the jaws go to exactly 0.00 / 24.50 with the mimic applied — identical to no
+  constraint at all, for the `transY` and `linear` axis tokens alike.
+- **A fixed tendon spans the *subtree* of the joint it is rooted on.** The two
+  finger joints are siblings, so a tendon rooted on one cannot reach the other:
+  that arrangement drags the rooted jaw to the rest length and leaves the other
+  exactly where it was told. It has to be rooted on a common ancestor —
+  `j4_wrist_roll` — carrying gearing 0 so the wrist stays out of the sum.
+
+**And it cannot be made rigid at 60 Hz.** A spring that stiff on an axis carrying
+`FINGER_ARMATURE_KG` rings at `sqrt(k/m)`, which the step has to resolve. At 1e6
+that is ω·dt = 43 and the jaws buzz — and the buzz does not show up in the close,
+where it gives the *best* alignment of anything tried, but in the lift, where it
+shakes the cube straight back out:
+
+| stiffness | jaw asymmetry after the close | carries the cube? |
+|---|---|---|
+| none | 0.22 / 1.63 / 1.27 mm | yes |
+| **3e4, c=400** | **0.08 / 0.81 / 0.38 mm** | **yes** |
+| 1e5, c=2e3 | 0.10 / 0.84 / 0.64 mm | yes (overdamped to stay stable) |
+| 1e6, c=1e3 | 0.04 / 0.13 / 0.08 mm | **no — 3 of 6 dropped it** |
+
+So the coupling roughly halves the asymmetry rather than abolishing it, and that
+is the whole of what a 60 Hz step will give. The damping is not free either: it
+is what keeps the stiffer settings stable, but it drags on the very motion that
+equalises the jaws, which is why 1e5 at 8× critical damping aligns *worse* than
+3e4 at 2×.
+
+Software coupling is not a substitute: projecting the pair back onto L = R would
+drive the near jaw straight into the cube it is already touching.
+
+With the tongs at their correct length and the tendon in, the whole
+`check_grip.py` set passes:
+
+| case | cube ends, from the TCP | jaw asymmetry |
+|---|---|---|
+| square on | 0.11 mm | 0.16 mm |
+| ±20° mis-aimed | 1.91 / 0.96 mm | 0.08 / 0.20 mm |
+| cube already at 25° | 0.22 mm | 0.81 mm |
+| worst mis-aim in the set | 0.64 mm | 0.12 mm |
 
 ### The camera *is* the rig's camera
 

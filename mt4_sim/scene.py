@@ -21,6 +21,7 @@ from mt4_sim.arm import (
     bind_finger_friction,
     bind_physics_material,
     configure_finger_joints,
+    couple_finger_joints,
     define_physics_material,
     prepare_gripper_contacts,
 )
@@ -477,4 +478,8 @@ def build(stage, arm_usd: Path, texture_dir: Path) -> list[str]:
     prepare_gripper_contacts(stage)
     bind_finger_friction(stage)
     configure_finger_joints(stage)
+    # Has to happen here rather than in ``SimArm``: PhysX reads tendons when it
+    # builds the articulation, so a stage that is already simulating cannot pick
+    # this up the way it can pick up a drive gain.
+    couple_finger_joints(stage)
     return set_park_pose(stage)

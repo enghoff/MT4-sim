@@ -39,14 +39,16 @@ from mt4_sim.chain import (
 # jaws go, so that is the prismatic stop.
 FINGER_TRAVEL_M = 0.5 * span_mm_for_s(GRIPPER_S_OPEN) * MM
 
-FINGER_LENGTH_MM = 26.0
+# The blade's cross-section: 20mm across the pad face, 10mm through. Its third
+# dimension is the long one and comes from the gripper's height, below.
+FINGER_WIDTH_MM = 20.0
 FINGER_THICK_MM = 10.0
-# The tongs hang from the TCP down to the wood, which is what ``TONG_REACH_MM``
-# measures. That is the real gripper's proportions: long blades, so the servo
-# housing and the head plate ride well clear of whatever is being picked. The
-# short jaws this replaces put the gripper body's underside exactly on a 20 mm
-# cube's top face, pinning the cube against the desk while the jaws tried to
-# turn it.
+# The tongs hang ``TONG_REACH_MM`` below the TCP -- the real gripper's measured
+# height from J4 to the tips. That is the real gripper's proportions: long
+# blades, so the servo housing and the head plate ride well clear of whatever is
+# being picked. The short jaws this replaces put the gripper body's underside
+# exactly on a 20 mm cube's top face, pinning the cube against the desk while
+# the jaws tried to turn it.
 FINGER_ABOVE_TCP_MM = 12.0
 FINGER_BELOW_TCP_MM = TONG_REACH_MM
 FINGER_HEIGHT_MM = FINGER_ABOVE_TCP_MM + FINGER_BELOW_TCP_MM
@@ -62,10 +64,17 @@ FINGER_INNER_TO_CENTER_MM = FINGER_THICK_MM / 2.0
 
 @dataclass(frozen=True)
 class Box:
-    """A box visual/collision shape: size and centre in the link's frame (mm)."""
+    """A box visual/collision shape: size and centre in the link's frame (mm).
+
+    ``material`` names a colour from :data:`MATERIALS` when this box is not the
+    same colour as the rest of its link -- the shoulder steppers are bare motors
+    bolted to a painted casting, and drawing them in the casting's orange is the
+    difference between the arm reading as an MT4 and reading as a lump.
+    """
 
     size: tuple[float, float, float]
     centre: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    material: str | None = None
 
     def size_m(self) -> str:
         return " ".join(f"{v * MM:.6f}" for v in self.size)
@@ -114,39 +123,82 @@ def _lumped_inertia(link: Link) -> tuple[tuple[float, float, float], float, tupl
     return com, link.mass, tuple(inertia)
 
 
-# The static base is the arm's own column, drawn at the height the CAD gives it:
-# 140mm from its foot up to the shoulder pivot, which puts the foot on the
-# modelling plane at z = 0. `base_link`'s frame *is* that plane -- and that plane
-# is the desk, because the arm stands on it. `mt4_sim.rig` still cuts the wood
-# back around the footprint so the tabletop is not a static collider coincident
-# with the foot.
-_BASE_TOP_MM = 76.0
-_FOOT_H = 8.0
+# The two bodies J1 joins, measured off the STEP assembly rather than sketched.
+# `tools/step_assembly.py` prints the boxes these come from; the CAD's own frame
+# has +Y up and its origin on the J1 axis 4mm above the feet, so every number
+# below is its assembly reading converted by
+#
+#     robot x = CAD x + 20        (the J1 bore sits at CAD x = -20)
+#     robot y = CAD z
+#     robot z = CAD y + 4         (the underside of the feet is the desk)
+#
+# The base is *not* centred on the J1 axis: the 110x110 extrusion stands 20mm
+# forward of it. That asymmetry is load-bearing for how the arm looks -- centred,
+# the pedestal reads as a plinth the column grows out of; offset, it reads as a
+# box the column turns on the back of.
+_BASE_FORWARD_MM = 20.0
+
+# Heights above the desk, bottom to top. These are spans, not a partition: the
+# pedestal extrusion starts 1mm inside the foot plate and the yoke starts 1mm
+# clear of the shroud, both as the CAD has them.
+_FOOT_MM = (0.0, 5.0)       # 2001-03 底板, the plate the rubber feet are under
+_PEDESTAL_MM = (4.0, 54.0)  # 2001-01 底盒型材110x110 + 2001-02 顶板 v1.1
+_SHROUD_MM = (54.0, 75.0)   # 2000-04 一轴遮罩, the cover over the J1 bearing
+# The rotating body. Its side plates run from the shroud right past the shoulder
+# pivot, and the two steppers driving J2 and J3 hang off them sideways -- at
+# 184mm tip to tip, the widest thing on the machine.
+_YOKE_MM = (76.0, 160.0)    # 0200-01/02/03, the rotating seat and its plates
+_MOTOR_MM = (87.0, 129.0)   # 42CM08-60 x2
+_MOTOR_HALF_Y_MM = 50.0     # centre of each 84mm-wide motor, out from the midline
+
+
+def _span(lo_hi: tuple[float, float]) -> tuple[float, float]:
+    """A (low, high) span as the (size, centre) a :class:`Box` wants."""
+    lo, hi = lo_hi
+    return hi - lo, (lo + hi) / 2.0
+
+
+_FOOT_H, _FOOT_C = _span(_FOOT_MM)
+_PEDESTAL_H, _PEDESTAL_C = _span(_PEDESTAL_MM)
+_SHROUD_H, _SHROUD_C = _span(_SHROUD_MM)
+_YOKE_H, _YOKE_C = _span(_YOKE_MM)
+_MOTOR_H, _MOTOR_C = _span(_MOTOR_MM)
 
 LINKS: tuple[Link, ...] = (
+    # `base_link`'s frame is the J1 axis on the desk: the arm stands on the wood,
+    # so z = 0 is both. `mt4_sim.rig` cuts the tabletop back around the footprint
+    # so the wood is not a static collider coincident with the feet.
     Link(
         "base_link",
         1.20,
         (
-            Box((140.0, 120.0, _FOOT_H), (0.0, 0.0, _FOOT_H / 2.0)),
-            Box(
-                (104.0, 92.0, _BASE_TOP_MM - _FOOT_H),
-                (0.0, 0.0, (_BASE_TOP_MM + _FOOT_H) / 2.0),
-            ),
+            Box((110.0, 130.0, _FOOT_H), (_BASE_FORWARD_MM, 0.0, _FOOT_C)),
+            Box((110.0, 110.0, _PEDESTAL_H), (_BASE_FORWARD_MM, 0.0, _PEDESTAL_C)),
+            # The shroud over the J1 bearing, narrower than the pedestal it sits
+            # on. This step is what keeps the base looking squat: without it the
+            # pedestal has to run the full 75mm at full width, and a 110-wide box
+            # 75 tall reads far taller than the real machine.
+            Box((85.0, 72.0, _SHROUD_H), (_BASE_FORWARD_MM - 1.0, 0.0, _SHROUD_C)),
         ),
     ),
-    # The rotating column carries on from where the static base stops up to the
-    # shoulder yoke. Its frame is the shoulder pivot at z = CENCER_HEIGHT, so
-    # everything here is measured down from there.
+    # The rotating column carries on from where the static base stops. Its frame
+    # is the shoulder pivot -- CENCER_OFFSET forward of J1 and CENCER_HEIGHT up
+    # -- so everything here is measured back and down from there.
     Link(
         "link1_column",
         0.50,
         (
+            Box((106.0, 64.0, _YOKE_H), (20.0 - CENCER_OFFSET, 0.0, _YOKE_C - CENCER_HEIGHT)),
             Box(
-                (96.0, 84.0, CENCER_HEIGHT + 2.0 - _BASE_TOP_MM),
-                (0.0, 0.0, (_BASE_TOP_MM - CENCER_HEIGHT + 2.0) / 2.0),
+                (42.0, 84.0, _MOTOR_H),
+                (-CENCER_OFFSET, _MOTOR_HALF_Y_MM, _MOTOR_C - CENCER_HEIGHT),
+                material="motor",
             ),
-            Box((62.0, 64.0, 44.0), (CENCER_OFFSET - 17.0, 0.0, 0.0)),
+            Box(
+                (42.0, 84.0, _MOTOR_H),
+                (-CENCER_OFFSET, -_MOTOR_HALF_Y_MM, _MOTOR_C - CENCER_HEIGHT),
+                material="motor",
+            ),
         ),
     ),
     Link("upper_arm", 0.28, (Box((LINKAGE1, 30.0, 40.0), (LINKAGE1 / 2.0, 0.0, 0.0)),)),
@@ -169,7 +221,7 @@ LINKS: tuple[Link, ...] = (
         # +Y is outward; origin is the inner (pad) face, box grows outward.
         (
             Box(
-                (FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
+                (FINGER_WIDTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
                 (0.0, FINGER_INNER_TO_CENTER_MM, FINGER_CENTRE_Z_MM),
             ),
         ),
@@ -180,7 +232,7 @@ LINKS: tuple[Link, ...] = (
         # -Y is outward on this side (joint axis is (0,-1,0)).
         (
             Box(
-                (FINGER_LENGTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
+                (FINGER_WIDTH_MM, FINGER_THICK_MM, FINGER_HEIGHT_MM),
                 (0.0, -FINGER_INNER_TO_CENTER_MM, FINGER_CENTRE_Z_MM),
             ),
         ),
@@ -227,6 +279,9 @@ MATERIALS = {
     "gripper_base": (0.16, 0.17, 0.19),
     "finger_left": (0.75, 0.76, 0.78),
     "finger_right": (0.75, 0.76, 0.78),
+    # Not a link: the bare shoulder steppers, which are black where the casting
+    # they bolt to is orange. See ``Box.material``.
+    "motor": (0.12, 0.12, 0.13),
 }
 
 
@@ -270,7 +325,9 @@ def build_urdf() -> ET.ElementTree:
                 geom = ET.SubElement(node, "geometry")
                 ET.SubElement(geom, "box", {"size": box.size_m()})
                 if tag == "visual":
-                    ET.SubElement(node, "material", {"name": f"mt4_{link.name}"})
+                    ET.SubElement(
+                        node, "material", {"name": f"mt4_{box.material or link.name}"}
+                    )
 
     for joint in JOINTS:
         el = ET.SubElement(robot, "joint", {"name": joint.name, "type": joint.kind})

@@ -200,6 +200,56 @@ class GripperSpanModel(unittest.TestCase):
         self.assertGreater(clear_mm, 20.0 + 10.0)  # cube + comfortable margin
         self.assertAlmostEqual(clear_mm, 38.4, delta=0.2)
 
+    def test_the_tongs_reach_the_wood_at_the_firmware_floor(self):
+        """`GROUND_Z_MM` is what pins the tongs' length, and it is not free.
+
+        A floor is the TCP height at which the lowest thing on the arm touches
+        the ground. The tong tips are that thing, so tongs of the right length
+        put the tips exactly on the desk when the TCP is at `GROUND_Z_MM`. If
+        this drifts, either the gripper is the wrong height or the firmware's
+        floor has moved and the sim no longer agrees with the machine.
+        """
+        from mt4_sim.chain import DESK_Z_MM, GROUND_Z_MM, TONG_REACH_MM
+
+        self.assertAlmostEqual(GROUND_Z_MM - TONG_REACH_MM, DESK_Z_MM, places=9)
+
+    def test_the_tongs_clear_the_wood_while_gripping(self):
+        """At grip height the tips must be off the desk but well down a cube.
+
+        Tips resting on the wood is the arrangement this replaced: the blades
+        dragged, and whichever bit first was held by desk friction, which walked
+        the cube across the gripper.
+        """
+        from mt4_sim.chain import TCP_GRIP_Z_MM, TONG_CLEARANCE_MM, TONG_REACH_MM
+
+        self.assertGreater(TONG_CLEARANCE_MM, 0.0)
+        # Still deep enough to hold a 20 mm cube by its sides, not its top edge.
+        cube_mm = 20.0
+        self.assertGreater(cube_mm - TONG_CLEARANCE_MM, cube_mm / 2.0)
+        self.assertAlmostEqual(
+            TCP_GRIP_Z_MM - TONG_REACH_MM, TONG_CLEARANCE_MM, places=9
+        )
+
+    def test_the_blades_are_as_wide_as_the_real_ones(self):
+        from mt4_sim.urdf import FINGER_HEIGHT_MM, FINGER_WIDTH_MM, LINKS
+
+        by_name = {link.name: link for link in LINKS}
+        for side in ("finger_left", "finger_right"):
+            box = by_name[side].shapes[0]
+            self.assertAlmostEqual(box.size[0], FINGER_WIDTH_MM, places=9)
+            self.assertAlmostEqual(box.size[2], FINGER_HEIGHT_MM, places=9)
+
+    def test_the_jaw_coupling_is_a_zero_sum_over_the_two_axes(self):
+        """The scissor constraint is q_left - q_right = 0, at any opening.
+
+        `finger_positions_for_s` is what the drive is handed, so if it ever
+        stopped being symmetric the tendon would be fighting the drive rather
+        than the cube.
+        """
+        for s in (GRIPPER_S_OPEN, 140.0, 180.0, GRIPPER_S_CLOSED):
+            left, right = finger_positions_for_s(s)
+            self.assertAlmostEqual(1.0 * left + -1.0 * right, 0.0, places=12)
+
     def test_the_grip_force_is_the_cap_not_the_spring(self):
         """The host closes past contact, so the drive always saturates.
 
