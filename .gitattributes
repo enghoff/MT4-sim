@@ -1,0 +1,2 @@
+# The working tree is LF; keep it that way despite a global core.autocrlf=true.
+* text=auto eol=lf

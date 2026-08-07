@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# Everything under assets/ and out/ is produced by scripts/, in this order:
+#   build_urdf.py -> import_urdf.py -> build_scene.py -> check.py
+assets/mt4.urdf
+assets/mt4/
+assets/mt4_scene.usda
+assets/textures/
+out/
+
+# WLKATA's CAD, cloned from github.com/wlkata/MT4-STL (16MB of STL + STEP).
+vendor/
