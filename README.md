@@ -22,16 +22,34 @@ and all five pass:
 | The URDF chain reproduces `mt4_jog.kinematics.fk_tcp` | **0.0002 mm** unexplained across the soft-limit box |
 | Position drives settle at the commanded pose | **≤ 0.04°** per joint |
 | The simulated camera's ArUco tags decode | **5 of 5**, via `cv2.aruco` DICT_4X4_50 |
-| Those tags, read back with the rig's own `vision_calibration.json` | **7–22 mm** and **≤ 3.6°** from where that file says they are taped |
-| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **3 of 3** colours, 2901–4990 px² blobs |
+| Those tags, read back with the rig's own `vision_calibration.json` | **1.6–7.1 mm** and **≤ 1.3°** from where that file says they are taped |
+| Cubes clear `mt4_vision.detect`'s own HSV thresholds | **3 of 3** colours, 1513–5724 px² blobs |
 
 The last three matter more than they look: the simulated scene camera's frames
 go straight into the real `mt4_vision.detect` and the real `Calibration` with
-nothing adapted. The cube blob areas land inside the 1600–3600 px² the repo
-measured on the live rig, and a tag detected in a simulated frame, pushed
-through the live homography, comes out where the live rig says that tag is —
-which is the strongest available statement that the two scenes are the same
-scene.
+nothing adapted. A tag detected in a simulated frame, pushed through the live
+homography, comes out where the live rig says that tag is — which is the
+strongest available statement that the two scenes are the same scene — and the
+nine cubes read back to **5.6 mm mean, 10.8 mm worst** of where the stage
+actually put them.
+
+The blob areas are the one number that does *not* sit inside what the rig
+measured, and the spread is the point: pushed through the rig's own cube-top
+map, a 20 mm cube's top face covers **281 px² at the far side of the work
+region and 2573 px² at the near side** — a factor of 9 — because the camera is
+242 mm up and steeply oblique. `mt4_vision` gates cube blobs on **fixed** areas
+(`MIN_BLOB_AREA` 800, `MAX_BLOB_AREA` 6000, `PICK_MIN_AREA` 400, `PICK_MAX_AREA`
+5000) measured on cubes sitting on the markers, where the top face is 417–1361
+px². Cubes further out image past the cap and are dropped as phantoms: the two
+outermost of the nine measure 5723 and 5724 px², and a nine-level `stack_cubes`
+run therefore stops at seven with both of them sitting plainly on the desk.
+
+Carrying the rig's *own* on-pad measurements across the work region says the
+same thing without the sim in the argument — a cube that reads 2790–3627 px² on
+a marker reads 523–6856 px² over the region the arm is allowed to work, which
+puts 5.8–19.3% of it under `MIN_BLOB_AREA` and 0.9–8.7% over `PICK_MAX_AREA`.
+That is the live stack's gate, not the sim's, and it is faithfully reproduced
+here.
 
 ## Quick start
 
@@ -382,21 +400,55 @@ With the tongs at their correct length and the tendon in, the whole
 ### The camera *is* the rig's camera
 
 The lens sits exactly where `calibrate_camera_nadir.py` put it: nadir (505, 1),
-242 mm above the table. Where it points and how wide it sees are recorded
-nowhere — the rig's calibration is a homography fit straight from tag pixels to
+242 mm above the table. Everything else about the camera is recorded nowhere —
+the rig's calibration is a homography fit straight from tag pixels to
 millimetres and deliberately needs no intrinsics — so `mt4_sim.calibration` fits
-those three numbers back out of the homography itself, with the lens pinned. For
-a pinhole, a plane homography *is* the aim and the focal length.
+it back out of the homography itself, with the lens pinned. For a pinhole, a
+plane homography *is* the orientation and the intrinsics.
 
-It comes out aimed at (−33, −36) with a **76° horizontal field**: nearly past
-the desk, which is why the work area sits in the lower half of the frame in the
-rig's own captures and now does in the sim's. That reproduces the rig's
-pixel↔table map to **21 px rms (14 mm)**, and `check.py` prints it.
+**All six of the remaining numbers have to be fitted**, not just three. A camera
+pinned in space still has three angles, a focal length and a principal point,
+and the rig's map needs every one:
 
-The residual is the real lens's barrel distortion, which no pinhole can express.
-Letting the lens position float as well cuts it to 7 px — but lands 70 mm from
-where the rig measured the lens, which is distortion being absorbed as a wrong
-camera position. The sim keeps the measured position and reports the error.
+| model | reproduces the rig's pixel↔table map to |
+|---|---|
+| aim + focal length (level, principal point centred) | 21.2 px — 13.9 mm |
+| + roll | 17.4 px |
+| **+ principal point** | **5.4 px — 4.2 mm** |
+
+The principal point is the term that carries it, and it is the same fact as the
+rig's work area sitting low in its own frame: the fit puts the optical axis
+nearly horizontal, aimed past the far side of the desk, with the axis crossing
+the sensor at (699, 140) of 1280×720 and an **81.8°** horizontal field.
+`check.py` prints the fit.
+
+Those 13.9 mm were not a rendering nicety. They landed on **every cube position
+the live stack read out of a simulated frame**, which is what `stack_cubes.py`
+sends the gripper to. On the default nine-cube layout:
+
+| | cube read-back | tags, through the rig's own calibration | `stack_cubes --marker 2` |
+|---|---|---|---|
+| aim + focal only | 13.9 mm mean, 21.7 worst | 6.7–21.8 mm | **12 of 20 picks missed** |
+| full camera | **5.6 mm mean, 10.8 worst** | **1.6–7.1 mm** | **0 missed** |
+
+A miss is not a retry: the jaws close beside the cube and shove it. One green
+cube was walked 105 mm across the desk over seven attempts before the run gave
+up on it.
+
+**Pixels stay square, and that is a constraint rather than a simplification.**
+`isaacsim.sensors.camera.Camera` rewrites `verticalAperture` to match the
+resolution's aspect ratio whenever the two disagree — it warns, and carries on —
+so a second focal length fitted here is dropped on the way to the renderer, and
+`SceneCamera` quietly stops describing the camera that took the picture. Fitting
+one buys 0.7 px on paper and nothing at all in the frame.
+
+What is left is a real disagreement rather than a slack fit. Let the lens float
+as well and the map is reproduced **exactly**, at a lens 60 mm from the measured
+one — so the rig's homography, which is a least-squares fit over barrel
+distortion no projective map can carry, is not quite the map of *any* pinhole
+standing where the rig says the lens stands. The sim keeps the measured position,
+because it is a measurement and because the parallax of anything with height
+hangs off it, and reports the residual.
 
 ### Tag textures are content-addressed, and have to be
 

@@ -71,14 +71,18 @@ WALL_RGB = (0.86, 0.85, 0.82)
 # --------------------------------------------------------------------------
 
 # The lens exactly where `calibrate_camera_nadir.py` measured it -- nadir
-# (505, 1), 242mm above the table -- aimed and zoomed to reproduce the
-# calibration's own pixel<->table map as closely as a distortion-free pinhole
-# can. `check.py` prints how closely that is.
+# (505, 1), 242mm above the table -- with the orientation, the two focal
+# lengths and the principal point fitted to reproduce the calibration's own
+# pixel<->table map. Every one of those seven is load-bearing: the live stack
+# reads cube positions through that map, so whatever the fit leaves on the
+# table is added to every pick. `check.py` prints how much that is.
 SCENE_CAMERA = calibration.scene_camera()
 CAM_POSITION_MM = SCENE_CAMERA.position_mm
 CAM_TARGET_MM = SCENE_CAMERA.target_mm
 CAM_RESOLUTION = SCENE_CAMERA.resolution
 CAM_HORIZONTAL_FOV_DEG = SCENE_CAMERA.horizontal_fov_deg
+CAM_ROLL_DEG = SCENE_CAMERA.roll_deg
+CAM_PRINCIPAL_POINT_PX = SCENE_CAMERA.principal_point_px
 
 
 # --------------------------------------------------------------------------

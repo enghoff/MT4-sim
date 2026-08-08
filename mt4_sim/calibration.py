@@ -139,11 +139,28 @@ def desk_back_edge() -> tuple[float, float]:
 
 @dataclass(frozen=True)
 class SceneCamera:
-    """A pinhole standing in for the rig's webcam, fitted to its table map."""
+    """A pinhole standing in for the rig's webcam, fitted to its table map.
+
+    ``target_mm`` is a point on the optical axis rather than a place of
+    interest: with the axis this close to horizontal, where it meets the wood
+    runs off to a metre and a half out and is numerically useless to aim by.
+    ``roll_deg`` turns the image about that axis, and ``principal_point_px`` is
+    where the axis crosses the sensor -- both are ordinary camera parameters a
+    USD camera carries, and both are needed to reproduce the rig's map.
+
+    Pixels are square, and that is a constraint rather than a simplification:
+    ``isaacsim.sensors.camera.Camera`` rewrites ``verticalAperture`` to match
+    the resolution's aspect ratio whenever the two disagree, so a second focal
+    length fitted here would be dropped on the way to the renderer and this
+    object would stop describing the camera that took the picture. It costs
+    0.7 px of the fit.
+    """
 
     position_mm: tuple[float, float, float]
     target_mm: tuple[float, float, float]
+    roll_deg: float
     horizontal_fov_deg: float
+    principal_point_px: tuple[float, float]
     resolution: tuple[int, int]
     residual_px: float
     residual_mm: float
@@ -202,22 +219,61 @@ def _fit_samples(step_mm: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
     return grid[seen], pixels[seen]
 
 
-def _project(lens, target, focal_px, points_mm, resolution):
-    """Robot XY on the table -> pixel, for a level (unrolled) look-at pinhole."""
-    width, height = resolution
-    forward = np.array(target, float) - np.array(lens, float)
-    forward /= np.linalg.norm(forward)
-    right = np.cross(forward, [0.0, 0.0, 1.0])
-    right /= np.linalg.norm(right)
-    down = np.cross(forward, right)
+# How far along the optical axis :attr:`SceneCamera.target_mm` is placed. Only
+# the direction matters -- ``scene.look_at`` renormalises it -- so this is a
+# readable distance and nothing depends on the value.
+AXIS_POINT_MM = 1000.0
 
-    rel = np.column_stack([points_mm, np.full(len(points_mm), target[2])]) - np.array(lens, float)
+
+def _axis_from(yaw_rad: float, pitch_rad: float) -> np.ndarray:
+    """Unit optical axis from a compass bearing and an elevation."""
+    return np.array(
+        [
+            math.cos(pitch_rad) * math.cos(yaw_rad),
+            math.cos(pitch_rad) * math.sin(yaw_rad),
+            math.sin(pitch_rad),
+        ]
+    )
+
+
+def _camera_basis(forward, roll_rad: float):
+    """Optical axis, image +x and image +y (down), for a camera rolled by roll.
+
+    At zero roll the image's x axis is world-horizontal, which is what
+    ``scene.look_at`` builds from a bare eye/target pair. The roll term turns
+    the pair about the axis, matching the ``roll_deg`` that function takes.
+    """
+    forward = np.asarray(forward, float)
+    forward = forward / np.linalg.norm(forward)
+    level_right = np.cross(forward, [0.0, 0.0, 1.0])
+    level_right /= np.linalg.norm(level_right)
+    level_down = np.cross(forward, level_right)
+    cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
+    return (
+        forward,
+        cos_r * level_right + sin_r * level_down,
+        -sin_r * level_right + cos_r * level_down,
+    )
+
+
+def _project(lens, forward, roll_rad, focal_px, principal_px, points_mm, z_mm):
+    """Robot XY at height ``z_mm`` -> pixel, for a general pinhole.
+
+    ``focal_px`` and ``principal_px`` are (x, y) pairs: a camera whose two axes
+    scale differently and whose axis does not cross the middle of the sensor is
+    an ordinary camera, and the rig's map needs both to be reproduced.
+    """
+    lens = np.array(lens, float)
+    forward, right, down = _camera_basis(forward, roll_rad)
+    points_mm = np.atleast_2d(points_mm)
+
+    rel = np.column_stack([points_mm, np.full(len(points_mm), z_mm)]) - lens
     depth = rel @ forward
     return (
         np.column_stack(
             [
-                focal_px * (rel @ right) / depth + width / 2.0,
-                focal_px * (rel @ down) / depth + height / 2.0,
+                focal_px[0] * (rel @ right) / depth + principal_px[0],
+                focal_px[1] * (rel @ down) / depth + principal_px[1],
             ]
         ),
         depth,
@@ -225,42 +281,76 @@ def _project(lens, target, focal_px, points_mm, resolution):
 
 
 def scene_camera() -> SceneCamera:
-    """The sim's camera: the measured lens, aimed and zoomed to match the rig.
+    """The sim's camera: the measured lens, oriented and zoomed to match the rig.
 
-    The lens is pinned exactly where the rig measured it, leaving three numbers
-    -- where it points and how wide it sees -- to be recovered by least squares
-    against the calibration's own pixel<->table map. The residual is reported
-    rather than hidden: a real webcam has barrel distortion that no pinhole can
-    express, and it is the reason this lands tens of pixels out at the frame
-    edges rather than exactly.
+    The lens is pinned exactly where the rig measured it. Everything a pinhole
+    with square pixels has left -- the three angles of its orientation, the
+    focal length and the principal point -- is recovered by least squares
+    against the calibration's own pixel<->table map.
+
+    All six matter. Pinning the roll to level and the principal point to the
+    middle of the sensor leaves a 3-parameter camera, and that camera
+    reproduces the rig's map to 21 px (14 mm on the table) where the full one
+    manages 5.4 px (4.2 mm). Those 14 mm are not a rendering nicety: they are
+    added to every cube position the live stack reads out of a simulated frame,
+    and they are what makes a simulated pick close its jaws beside the cube
+    instead of on it. The principal point is the term that carries most of it,
+    which is the same fact as the rig's own work area sitting low in its frame.
+
+    What is left over is a genuine disagreement rather than a slack fit. With
+    the lens free as well the map is reproduced exactly, at a lens 60 mm from
+    the measured one -- so the rig's homography, which is a least-squares fit
+    over lens distortion the projective model cannot carry, is not quite the
+    map of *any* pinhole standing where the rig says the lens stands. The
+    measured position is kept, because it is a measurement and because the
+    parallax of anything with height hangs off it, and the residual is
+    reported.
     """
-    lens = lens_position_mm()
+    lens = np.array(lens_position_mm(), float)
     # The plane the camera is looking at is the wood, not the TCP height that
     # grips something lying on it.
     table_z = desk_surface_z_mm()
-    resolution = frame_size_px()
+    width, height = resolution = frame_size_px()
     points, truth = _fit_samples()
 
+    def unpack(params):
+        yaw, pitch, roll, focal, cx, cy = params
+        return _axis_from(yaw, pitch), roll, (focal, focal), (cx, cy)
+
     def residual(params):
-        target = (params[0], params[1], table_z)
-        pixels, depth = _project(lens, target, params[2], points, resolution)
-        if params[2] <= 0.0 or depth.min() <= 1.0:
+        forward, roll, focal, principal = unpack(params)
+        pixels, depth = _project(lens, forward, roll, focal, principal, points, table_z)
+        if focal[0] <= 0.0 or depth.min() <= 1.0:
             return np.full(2 * len(points), 1e6)  # aimed behind its own lens
         return (pixels - truth).ravel()
 
-    solution = least_squares(residual, [0.0, 0.0, 700.0], xtol=1e-14, ftol=1e-14)
-    target_x, target_y, focal_px = solution.x
+    # Seed the orientation by aiming at the middle of the region being fit, so
+    # the solver starts with the desk in frame rather than hunting for it.
+    middle = points.mean(axis=0)
+    to_middle = np.array([middle[0], middle[1], table_z]) - lens
+    seed = [
+        math.atan2(to_middle[1], to_middle[0]),
+        math.asin(to_middle[2] / np.linalg.norm(to_middle)),
+        0.0,
+        700.0,
+        width / 2.0,
+        height / 2.0,
+    ]
+    solution = least_squares(residual, seed, xtol=1e-14, ftol=1e-14, max_nfev=20000)
+    forward, roll, focal, principal = unpack(solution.x)
 
-    pixels, _ = _project(lens, (target_x, target_y, table_z), focal_px, points, resolution)
+    pixels, _ = _project(lens, forward, roll, focal, principal, points, table_z)
     error_px = pixels - truth
     # What the mismatch costs downstream: a feature the sim renders at `pixels`,
     # read back through the live calibration, lands this far from the truth.
     read_back = np.array([CALIBRATION.pixel_to_robot(float(u), float(v)) for u, v in pixels])
 
     return SceneCamera(
-        position_mm=lens,
-        target_mm=(float(target_x), float(target_y), table_z),
-        horizontal_fov_deg=math.degrees(2.0 * math.atan(resolution[0] / 2.0 / focal_px)),
+        position_mm=tuple(float(v) for v in lens),
+        target_mm=tuple(float(v) for v in lens + forward * AXIS_POINT_MM),
+        roll_deg=math.degrees(roll),
+        horizontal_fov_deg=math.degrees(2.0 * math.atan(width / 2.0 / focal[0])),
+        principal_point_px=(float(principal[0]), float(principal[1])),
         resolution=resolution,
         residual_px=float(np.sqrt((error_px**2).sum(axis=1).mean())),
         residual_mm=float(np.sqrt(((read_back - points) ** 2).sum(axis=1).mean())),

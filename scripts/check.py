@@ -86,10 +86,12 @@ UNEXPLAINED_TOLERANCE_MM = 0.02
 DRIVE_TOLERANCE_DEG = 0.5
 
 # A tag read out of a simulated frame with the real rig's calibration file
-# cannot land exactly: the sim camera is a pinhole and the rig's is not. The
-# camera fit's own residual is ~14mm, so this is that plus room for detection
-# noise -- tight enough that a misplaced or mis-turned tag still fails.
-TAG_PLACEMENT_TOLERANCE_MM = 35.0
+# cannot land exactly: the rig's homography is a least-squares fit over lens
+# distortion, so it is not exactly the map of any pinhole standing where the
+# rig measured the lens. The camera fit's own residual is ~3mm, so this is that
+# plus room for detection noise -- tight enough that a misplaced or mis-turned
+# tag still fails.
+TAG_PLACEMENT_TOLERANCE_MM = 15.0
 TAG_YAW_TOLERANCE_DEG = 5.0
 
 
@@ -251,10 +253,12 @@ def check_tags_through_calibration(detected: dict) -> list[str]:
     ``vision_calibration.json``'s own homography, exactly as the live stack
     would, and compared against where that same file says the tag is taped.
 
-    The residual is not zero and cannot be. The real lens has barrel distortion
-    that a pinhole cannot express, so a sim camera pinned at the measured lens
-    position reproduces the rig's table map to about 20px -- ``rig.SCENE_CAMERA``
-    reports that fit. Anything much past it is a placement error, not optics.
+    The residual is not zero and cannot be. The rig's homography is fitted over
+    lens distortion the projective model cannot carry, so it is not exactly the
+    map of any pinhole standing where the rig measured the lens: pinned there,
+    the closest one reproduces the table map to about 5px --
+    ``rig.SCENE_CAMERA`` reports that fit. Anything much past it is a placement
+    error, not optics.
     """
     from mt4_sim.calibration import CALIBRATION
 
@@ -381,14 +385,22 @@ def report_camera_geometry() -> None:
         f"  lens at nadir ({eye[0]:6.1f}, {eye[1]:6.1f}), "
         f"{eye[2] - rig.DESK_TOP_Z_MM:5.1f}mm above the table -- as measured"
     )
+    axis = np.array(cam.target_mm) - np.array(eye)
+    axis /= np.linalg.norm(axis)
     print(
-        f"  aimed at ({cam.target_mm[0]:6.1f}, {cam.target_mm[1]:6.1f}), "
-        f"{cam.horizontal_fov_deg:5.2f} deg across {cam.resolution[0]}x{cam.resolution[1]}"
+        f"  optical axis ({axis[0]:6.3f},{axis[1]:6.3f},{axis[2]:6.3f}), "
+        f"rolled {cam.roll_deg:+.2f} deg"
+    )
+    print(
+        f"  {cam.horizontal_fov_deg:5.2f} deg across "
+        f"{cam.resolution[0]}x{cam.resolution[1]}, principal point "
+        f"({cam.principal_point_px[0]:6.1f},{cam.principal_point_px[1]:6.1f})"
     )
     print(
         f"  reproduces the calibration's pixel<->table map to "
-        f"{cam.residual_px:.1f} px rms ({cam.residual_mm:.1f} mm), which is the "
-        f"real lens's distortion"
+        f"{cam.residual_px:.1f} px rms ({cam.residual_mm:.1f} mm) -- the rig's "
+        f"homography is fitted over lens distortion, so it is not exactly any "
+        f"pinhole's map from the measured lens position"
     )
 
 

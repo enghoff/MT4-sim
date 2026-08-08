@@ -338,18 +338,38 @@ def add_cubes(stage) -> None:
         _bind(prim, _preview_material(stage, f"{WORLD}/Looks/Cube_{index}", rig.CUBE_RGB[cube.color]))
 
 
-def look_at(eye_m: Gf.Vec3d, target_m: Gf.Vec3d) -> Gf.Matrix4d:
+def look_at(eye_m: Gf.Vec3d, target_m: Gf.Vec3d, roll_deg: float = 0.0) -> Gf.Matrix4d:
     """Camera-to-world transform for a lens at ``eye_m`` aimed at ``target_m``.
 
-    A USD camera looks down its own -Z, so this is the inverse of a view matrix.
-    The reference up is world +Z unless the view is within a degree of vertical,
-    where +Z gives no unique roll and +Y is used instead.
+    A USD camera looks down its own -Z with +Y up, so the rows of this matrix
+    are the image's right, up and backward axes. The reference up is world +Z
+    unless the view is within a degree of vertical, where +Z gives no unique
+    roll and +Y is used instead.
+
+    ``roll_deg`` turns the image basis about the optical axis, positive from
+    the image's +x toward its +y. Without it the image's x axis is
+    world-horizontal, which is one constraint more than a camera bolted to a
+    bracket actually obeys -- ``calibration.scene_camera`` measures the rig's,
+    and ``calibration._camera_basis`` is the same rotation on the fitting side.
     """
     forward = (target_m - eye_m).GetNormalized()
     up = Gf.Vec3d(0, 0, 1)
     if abs(Gf.Dot(forward, up)) > 0.9998:
         up = Gf.Vec3d(0, 1, 0)
-    return Gf.Matrix4d().SetLookAt(eye_m, target_m, up).GetInverse()
+    right = Gf.Cross(forward, up).GetNormalized()
+    down = Gf.Cross(forward, right)
+
+    cos_r = math.cos(math.radians(roll_deg))
+    sin_r = math.sin(math.radians(roll_deg))
+    rolled_right = cos_r * right + sin_r * down
+    rolled_down = -sin_r * right + cos_r * down
+
+    matrix = Gf.Matrix4d(1.0)
+    matrix.SetRow3(0, rolled_right)
+    matrix.SetRow3(1, -rolled_down)
+    matrix.SetRow3(2, -forward)
+    matrix.SetRow3(3, eye_m)
+    return matrix
 
 
 def define_camera(
@@ -360,19 +380,47 @@ def define_camera(
     resolution,
     fov_deg: float,
     *,
+    roll_deg: float = 0.0,
+    principal_point_px=None,
     lock: bool = True,
 ):
+    """A USD camera from the terms a pinhole is fitted in.
+
+    The principal point becomes the pair of aperture offsets: USD's frustum
+    window is the aperture rectangle *shifted by the offset* and then divided
+    by the focal length, so an offset moves where the optical axis crosses the
+    sensor without moving the lens or changing what the camera is looking at.
+    It defaults to the middle of the sensor, which is what the preview camera
+    wants.
+
+    The vertical aperture follows the resolution's aspect ratio and is not a
+    free parameter: ``isaacsim.sensors.camera.Camera`` rewrites it to that
+    ratio whenever it disagrees, warning as it goes, so authoring anything else
+    yields a camera the stage describes and the renderer does not use.
+    """
     camera = UsdGeom.Camera.Define(stage, path)
     width, height = resolution
     aperture = 24.0  # mm of sensor; focal length follows from the field of view
+    vertical_aperture = aperture * height / width
+    focal_mm = aperture / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+
     camera.CreateHorizontalApertureAttr(aperture)
-    camera.CreateVerticalApertureAttr(aperture * height / width)
-    camera.CreateFocalLengthAttr(aperture / (2.0 * math.tan(math.radians(fov_deg) / 2.0)))
+    camera.CreateVerticalApertureAttr(vertical_aperture)
+    camera.CreateFocalLengthAttr(focal_mm)
     camera.CreateClippingRangeAttr(Gf.Vec2f(0.01, 20.0))
+
+    if principal_point_px is not None:
+        centre_x, centre_y = principal_point_px
+        camera.CreateHorizontalApertureOffsetAttr(
+            aperture * (width / 2.0 - centre_x) / width
+        )
+        camera.CreateVerticalApertureOffsetAttr(
+            vertical_aperture * (centre_y - height / 2.0) / height
+        )
 
     eye = Gf.Vec3d(*(v * MM for v in eye_mm))
     target = Gf.Vec3d(*(v * MM for v in target_mm))
-    UsdGeom.Xformable(camera).AddTransformOp().Set(look_at(eye, target))
+    UsdGeom.Xformable(camera).AddTransformOp().Set(look_at(eye, target, roll_deg))
     if lock:
         # Kit's viewport camera manipulator honours this: without it, switching
         # the GUI view to SceneCamera and orbiting would silently move the lens
@@ -392,6 +440,8 @@ def add_scene_camera(stage) -> None:
         rig.CAM_TARGET_MM,
         rig.CAM_RESOLUTION,
         rig.CAM_HORIZONTAL_FOV_DEG,
+        roll_deg=rig.CAM_ROLL_DEG,
+        principal_point_px=rig.CAM_PRINCIPAL_POINT_PX,
         lock=True,
     )
 
