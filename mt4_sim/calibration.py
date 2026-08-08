@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.spatial import ConvexHull
 
 from mt4_sim import mt4_repo  # noqa: F401  (sys.path bootstrap)
 
@@ -165,6 +166,15 @@ class SceneCamera:
     residual_px: float
     residual_mm: float
 
+    @property
+    def focal_px(self) -> float:
+        return self.resolution[0] / 2.0 / math.tan(math.radians(self.horizontal_fov_deg) / 2.0)
+
+    @property
+    def forward(self) -> np.ndarray:
+        axis = np.array(self.target_mm, float) - np.array(self.position_mm, float)
+        return axis / np.linalg.norm(axis)
+
 
 def desk_surface_z_mm() -> float:
     """The work surface itself, in the arm's frame: the plane its base stands on.
@@ -259,9 +269,10 @@ def _camera_basis(forward, roll_rad: float):
 def _project(lens, forward, roll_rad, focal_px, principal_px, points_mm, z_mm):
     """Robot XY at height ``z_mm`` -> pixel, for a general pinhole.
 
-    ``focal_px`` and ``principal_px`` are (x, y) pairs: a camera whose two axes
-    scale differently and whose axis does not cross the middle of the sensor is
-    an ordinary camera, and the rig's map needs both to be reproduced.
+    ``focal_px`` and ``principal_px`` are (x, y) pairs. The pair for the focal
+    length is what lets the fit's residual be quoted against a model with two,
+    even though the one this camera ships with holds them equal -- see
+    :class:`SceneCamera` on why the renderer insists.
     """
     lens = np.array(lens, float)
     forward, right, down = _camera_basis(forward, roll_rad)
@@ -278,6 +289,58 @@ def _project(lens, forward, roll_rad, focal_px, principal_px, points_mm, z_mm):
         ),
         depth,
     )
+
+
+def project_px(camera: SceneCamera, points_mm, height_mm: float = 0.0) -> np.ndarray:
+    """Robot XY, ``height_mm`` above the wood, to pixels through ``camera``."""
+    pixels, _ = _project(
+        camera.position_mm,
+        camera.forward,
+        math.radians(camera.roll_deg),
+        (camera.focal_px, camera.focal_px),
+        camera.principal_point_px,
+        points_mm,
+        desk_surface_z_mm() + height_mm,
+    )
+    return pixels
+
+
+def cube_silhouette_px2(
+    camera: SceneCamera,
+    x_mm: float,
+    y_mm: float,
+    size_mm: float,
+    yaw_deg: float = 0.0,
+) -> float:
+    """Pixel area a cube covers in the frame -- the whole cube, not its top face.
+
+    ``mt4_vision.detect`` thresholds colour and measures the blob's contour, so
+    what it sees is the cube's silhouette: the top face plus however much side
+    face this oblique camera catches. That is the number its area gates are
+    compared against, and it is not a property of the cube alone -- the same
+    cube covers nine times more of the frame at the near edge of the work
+    region than at the far one.
+
+    Checked against the sim's own frames, this predicts the detected blob to
+    within 3%: 0.92-0.99 of it across the nine default cubes, the shortfall
+    being the pixels a colour band clips off a shaded edge. That is what makes
+    it usable for the area a cube *would* read somewhere it has never been put.
+    """
+    half = size_mm / 2.0
+    cos_yaw, sin_yaw = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+    footprint = np.array(
+        [
+            (x_mm + dx * cos_yaw - dy * sin_yaw, y_mm + dx * sin_yaw + dy * cos_yaw)
+            for dx in (-half, half)
+            for dy in (-half, half)
+        ],
+        float,
+    )
+    corners = np.vstack(
+        [project_px(camera, footprint, 0.0), project_px(camera, footprint, size_mm)]
+    )
+    # scipy names a 2D hull's enclosed area `volume`; `area` is its perimeter.
+    return float(ConvexHull(corners).volume)
 
 
 def scene_camera() -> SceneCamera:

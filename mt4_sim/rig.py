@@ -125,10 +125,11 @@ CUBE_RGB = {
 # `stack_cubes` run needs -- spread as far apart as the rig allows rather than
 # clustered in front of the arm. `tools/spread_cubes.py` picks them: it maps
 # every place a cube is *permitted* to be and then takes the arrangement with the
-# largest smallest gap, which comes out at 111mm between the closest pair where
-# the hand-placed set managed 51mm.
+# largest smallest gap, which comes out at 99mm between the closest pair where
+# the hand-placed set managed 51mm, against the 45mm
+# `mt4_vision.workspace.PICK_CLEARANCE_MM` needs to straddle a cube.
 #
-# Five things bound that region at once, and all of them bite somewhere:
+# Six things bound that region at once, and all of them bite somewhere:
 #
 #   * the firmware's keep-out cylinder -- `KEEPOUT_RADIUS_MM` = 140 about the J1
 #     axis, at any height -- which is why nothing sits closer in than r = 164
@@ -142,14 +143,29 @@ CUBE_RGB = {
 #     extrapolating, and the live stack reads cube positions through that map
 #   * clear of the five tag cards, which are 59mm across including the quiet
 #     zone, not the 44.3mm of printed black -- a cube parked on one costs a
-#     decode. Every cube keeps at least 8mm of visible wood to the nearest card.
+#     decode. Every cube keeps at least 9mm of visible wood to the nearest card
+#   * imaged at an area `mt4_vision` will accept. Its gates are fixed pixel
+#     counts -- 800 to 5000 once the tighter of each pair is taken -- while this
+#     camera is 242mm up and steeply oblique, so a cube's blob spans a factor of
+#     nine across the desk. These nine cover 1669-4496 px^2 whatever their yaw.
+#     At (244,120) and (240,-180) a cube read 5599 and 5596 px^2, over
+#     `PICK_MAX_AREA`, and was dropped as a phantom rather than mislocated,
+#     which stopped a nine-level `stack_cubes` run at seven
+#
+# `spread_cubes.py --site` adds two more, both keyed to where the stack goes:
+# the site's keep-clear radius, so the run never shoves a cube aside to start,
+# and the standing column's forearm shadow. They are left off here. Each is
+# real -- a cube shoved off marker 2 landed at (266,-110) and images 5973 px^2,
+# and one at (180,-240) reads 13mm out at (192,-235), inside the shadow -- but
+# together they cost 37mm of the closest pair for one nominated marker, and
+# enforcing them for all four leaves 18 of 12800 cells and cubes 5.7mm apart.
 CUBES: tuple[Cube, ...] = (
-    Cube("red", 248.0, -44.0, 0.0),
-    Cube("green", 244.0, 120.0, 25.0),
-    Cube("blue", 240.0, -180.0, -15.0),
-    Cube("red", 196.0, 224.0, 30.0),
+    Cube("red", 216.0, -64.0, 0.0),
+    Cube("green", 212.0, 136.0, 25.0),
+    Cube("blue", 204.0, -196.0, -15.0),
+    Cube("red", 188.0, 232.0, 30.0),
     Cube("green", 156.0, 52.0, -10.0),
-    Cube("blue", 132.0, -264.0, 20.0),
+    Cube("blue", 100.0, -264.0, 20.0),
     Cube("red", 92.0, -136.0, -30.0),
     Cube("green", 92.0, 264.0, 10.0),
     Cube("blue", 80.0, 144.0, -20.0),

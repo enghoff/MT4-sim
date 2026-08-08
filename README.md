@@ -40,16 +40,22 @@ region and 2573 px² at the near side** — a factor of 9 — because the camera
 242 mm up and steeply oblique. `mt4_vision` gates cube blobs on **fixed** areas
 (`MIN_BLOB_AREA` 800, `MAX_BLOB_AREA` 6000, `PICK_MIN_AREA` 400, `PICK_MAX_AREA`
 5000) measured on cubes sitting on the markers, where the top face is 417–1361
-px². Cubes further out image past the cap and are dropped as phantoms: the two
-outermost of the nine measure 5723 and 5724 px², and a nine-level `stack_cubes`
-run therefore stops at seven with both of them sitting plainly on the desk.
+px². Cubes further out image past the cap and are dropped as phantoms — not
+mislocated, *gone*.
 
 Carrying the rig's *own* on-pad measurements across the work region says the
-same thing without the sim in the argument — a cube that reads 2790–3627 px² on
+same thing without the sim in the argument: a cube that reads 2790–3627 px² on
 a marker reads 523–6856 px² over the region the arm is allowed to work, which
 puts 5.8–19.3% of it under `MIN_BLOB_AREA` and 0.9–8.7% over `PICK_MAX_AREA`.
 That is the live stack's gate, not the sim's, and it is faithfully reproduced
 here.
+
+`tools/spread_cubes.py` therefore bounds the layout by it, predicting a cube's
+blob as its projected **silhouette** — the whole cube, not its top face, which
+is what a colour threshold actually outlines. That matches the detected blob to
+within 3% (0.92–0.99 of it over the nine), and it is checked at every yaw,
+because turning a cube swings its silhouette 16–26%. The nine now cover
+1669–4496 px².
 
 ## Quick start
 
@@ -285,13 +291,20 @@ recalibration on the real rig is one `build_scene.py` away from being true here.
   friction — see below, it is the number the gripper is most sensitive to.
   Positions come from `tools/spread_cubes.py` rather than by hand: it maps
   everywhere a cube is *permitted* to sit and takes the arrangement with the
-  largest smallest gap, which puts the closest pair 111 mm apart where the
-  hand-placed set managed 51 mm. Five things bound that region and every one of
+  largest smallest gap, which puts the closest pair 99 mm apart where the
+  hand-placed set managed 51 mm. Six things bound that region and every one of
   them binds somewhere — the firmware's 140 mm keep-out cylinder, reach at the
   +70 mm transit height as well as at the table, a 300 mm ceiling well inside the
   359 mm the IK will solve, the hull the calibration was actually *fit* over
-  (outside it the pixel↔table map is extrapolating), and the tag cards, which are
-  59 mm across including the quiet zone rather than the 44.3 mm of printed black.
+  (outside it the pixel↔table map is extrapolating), the tag cards, which are
+  59 mm across including the quiet zone rather than the 44.3 mm of printed black,
+  and the **blob-area gates** above. Two more are available behind `--site`, both
+  keyed to where the stack goes: the site's keep-clear radius, so the run never
+  shoves a cube aside to start, and the standing column's forearm shadow. They
+  are off by default — each is real, but together they cost 37 mm of the closest
+  pair for one nominated marker, and enforcing them for all four candidates at
+  once leaves 18 of 12800 cells and cubes 5.7 mm apart, well inside the 45 mm
+  `PICK_CLEARANCE_MM` wants.
 - **Lighting kept deliberately dim.** A bright dome washes saturation out of every
   coloured face, and a red cube under a strong dome falls out of its own hue band
   while still looking obviously red to a human.
