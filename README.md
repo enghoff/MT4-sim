@@ -353,6 +353,57 @@ just jam on its corners, and none of them is the grip force:
 Measured on a cube 20° off square: it turns 20.0° of 20 and ends face-gripped at
 19.77 mm, 0.63 mm off the TCP.
 
+### The armature moved the damping, and nobody moved it back
+
+Adding that armature quietly invalidated the number next to it. The jaw drive's
+damping was sized as `2·√(k·m) = 2·√(1000 × 0.02) = 8.94`, so `c = 12` was
+recorded as ζ = 1.34 — correct for a bare 20 g blade. But armature *is* the
+inertia the drive has to accelerate; that is the whole reason it is there. The
+effective mass is 0.32 kg, critical damping is 35.8, and `c = 12` was really
+**ζ = 0.34**: an underdamped drive, documented as an overdamped one.
+
+It shows up as the jaws cycling. The coupling tendon is roughly 100× stronger
+than the drives — measured through a stacking run its spring reaches 164 N and
+its damper 58 N, against a 1.5 N force cap — and an arm slew keeps handing the
+pair differential velocity. A drive at ζ = 0.34 rings on that instead of
+absorbing it, the swing grows until a blade reaches the end of its travel, and
+that one-sided stop rectifies it into **both jaws walking shut together**. With
+the host holding the gripper open the whole time, the gap collapses from the
+commanded 38.4 mm to 4.8 mm and back, at the drives' full 0.15 m/s.
+
+Replaying one stacking run's own command stream — same commands every time, no
+vision — the threshold is sharp, and it is about the velocity cap:
+
+| drive `c` | ζ | worst unforced gap error | peak jaw speed |
+|---|---|---|---|
+| **12 (was)** | 0.34 | **33.60 mm** | 0.1505 m/s — pinned at the cap |
+| 14 | 0.39 | 12.38 | 0.1500 — pinned |
+| **15 (is)** | 0.42 | **4.25** | 0.1096 |
+| 24 | 0.67 | 3.75 | 0.0953 |
+| 48 | 1.34 | 3.75 | 0.0877 |
+| 80 | 2.24 | 7.66 | 0.0830 |
+
+**ζ > 1 is not reachable, and that is a real tension rather than a preference.**
+The other end is a speed floor: a jaw saturating the force cap tops out at
+`F/c`, and if that is slower than the firmware advances S (~0.096 m/s per jaw at
+360 S/s) the jaws lag their own command through a free-space close.
+`tests/test_chain.py` asserts exactly that, and it is what rejected `c = 48`.
+The floor bounds `c` below 15.6 while ζ = 1 wants 35.8. Buying the rest would
+mean raising the grip force or dropping the armature, so 15 is the most the
+floor allows — and it is enough, because the qualitative change is the jaws
+coming off the velocity cap.
+
+Paired three-level `stack_cubes.py` runs, same scene, only this constant
+differing:
+
+| | worst unforced excursion | gap minimum | jaw speed *in* those episodes | picks |
+|---|---|---|---|---|
+| `c = 12` | 35.91 / 32.90 / 32.96 mm | 4.8 mm — nearly shut | 0.1505 m/s | 0 missed, 3/3 built |
+| `c = 15` | **5.83 / 5.84 / 6.01 mm** | 34.2 mm | 0.036 m/s | 0 missed, 3/3 built |
+
+Over a whole run, including the commanded sweeps, `c = 12` spends 15 steps
+pinned at the 0.15 m/s velocity ceiling and `c = 15` spends none.
+
 ### The jaws are coupled, as far as 60 Hz allows
 
 The real gripper is a scissor: one servo drives both blades through a symmetric
@@ -378,24 +429,53 @@ Two things about this are easy to get wrong, both measured rather than assumed:
   exactly where it was told. It has to be rooted on a common ancestor —
   `j4_wrist_roll` — carrying gearing 0 so the wrist stays out of the sum.
 
-**And it cannot be made rigid at 60 Hz.** A spring that stiff on an axis carrying
-`FINGER_ARMATURE_KG` rings at `sqrt(k/m)`, which the step has to resolve. At 1e6
-that is ω·dt = 43 and the jaws buzz — and the buzz does not show up in the close,
-where it gives the *best* alignment of anything tried, but in the lift, where it
-shakes the cube straight back out:
+**And it is deliberately soft — the softness is load-bearing.** The tendon is a
+force the step integrates rather than a constraint it solves, so it settles
+where it balances the jaw drives. Told left = 0 and right = 24.5 mm against
+drives capped at 1.5 N, the residual separation reads how hard it pulls:
 
-| stiffness | jaw asymmetry after the close | carries the cube? |
+| stiffness | residual separation | damping (at k = 3e5) | residual |
+|---|---|---|---|
+| **3e4** | **3.38 mm** | c = 100 | 0.24 mm |
+| 1e5 | 1.12 mm | **c = 400** | **0.47 mm** |
+| 3e5 | 0.47 mm | c = 1500 | 1.32 mm |
+| 1e6 | 0.25 mm | c = 5000 | 4.02 mm |
+
+Solver iteration count changes none of it — 8, 16, 32, 64 and 128 all settle at
+the same figure — and halving the physics step halves the separation. Note that
+**damping makes it worse**, because it drags on the motion that closes the gap
+and not only on the ringing; a stiff tendon with heavy damping bolted on to keep
+it stable is the worst of both, and that pairing is what dropped cubes.
+
+At 3e4/400 the pair visibly rocks, and **that give is load-bearing.** It is
+tempting to remove it, because doing so quiets the jaws and makes
+`check_grip.py` look immaculate — asymmetry closes to 0.04–0.05 mm against the
+0.20–0.26 here. It also costs picks, and the cost is steep. Repeated three-level
+`stack_cubes.py` runs, varying only the tendon damping:
+
+| tendon `c` | missed picks per run | stacks built |
 |---|---|---|
-| none | 0.22 / 1.63 / 1.27 mm | yes |
-| **3e4, c=400** | **0.08 / 0.81 / 0.38 mm** | **yes** |
-| 1e5, c=2e3 | 0.10 / 0.84 / 0.64 mm | yes (overdamped to stay stable) |
-| 1e6, c=1e3 | 0.04 / 0.13 / 0.08 mm | **no — 3 of 6 dropped it** |
+| **400** | 0, 0, 0, 0, 0, 0 | 6 of 6 |
+| 80 | 1, 1, 0 | 3 of 3 |
+| 20 | 1, 2, 2 | 3 of 3 |
+| 0 | 2, 9, 9, 9 | 3 of 4 |
 
-So the coupling roughly halves the asymmetry rather than abolishing it, and that
-is the whole of what a 60 Hz step will give. The damping is not free either: it
-is what keeps the stiffer settings stable, but it drags on the very motion that
-equalises the jaws, which is why 1e5 at 8× critical damping aligns *worse* than
-3e4 at 2×.
+Stiffening does the same thing: at k = 1e6 a run missed nine and walked a green
+cube from (91, 262) to (115, 151) across the desk. The difference is what the
+jaws close on — `check_grip.py` puts the cube at its true position, perfectly
+centred, where a rigid symmetric pair grips it beautifully, but a real pick aims
+at a *detected* position, 5.4 mm off on average and 11 mm at worst, and a rigid
+pair meeting an off-centre cube squeezes it out sideways instead of capturing
+it. The give is the gripper accommodating vision error.
+
+So the way to earn a stiffer tendon is better cube positions rather than firmer
+jaws. Passing `check_grip.py` is not sufficient evidence on its own — a stacking
+run is what shows this, and single runs are not enough either: outcomes vary
+enough run to run that both of these settings have a clean run in them.
+
+**The jaws cycling is not this knob.** Softening the coupling does quiet them,
+which is what makes it such an attractive wrong answer. The cause is the drive's
+damping ratio, one section up, and fixing it there costs nothing.
 
 Software coupling is not a substitute: projecting the pair back onto L = R would
 drive the near jaw straight into the cube it is already touching.
@@ -405,10 +485,17 @@ With the tongs at their correct length and the tendon in, the whole
 
 | case | cube ends, from the TCP | jaw asymmetry |
 |---|---|---|
-| square on | 0.11 mm | 0.16 mm |
-| ±20° mis-aimed | 1.91 / 0.96 mm | 0.08 / 0.20 mm |
-| cube already at 25° | 0.22 mm | 0.81 mm |
-| worst mis-aim in the set | 0.64 mm | 0.12 mm |
+| square on | 0.07 mm | 0.22 mm |
+| +20° mis-aimed | 0.40 mm | 0.08 mm |
+| −20° mis-aimed | 2.54 mm | 0.19 mm |
+| cube already at 25° | 0.10 mm | 0.14 mm |
+| cube already at 30° | 0.15 mm | 0.18 mm |
+
+Note what this set *cannot* tell you. Every cube here starts at its true
+position, perfectly centred between the blades, and on that the coupling can be
+made arbitrarily rigid and the numbers only improve — which is exactly how a
+setting that costs nine picks a run passes with 0.04 mm of asymmetry. The
+asymmetry column is a floor, not a verdict.
 
 ### The camera *is* the rig's camera
 

@@ -56,9 +56,11 @@ from mt4_sim.arm import (  # noqa: E402
     link_prim_path,
     prepare_gripper_contacts,
 )
+from mt4_sim.firmware.state import CART_SEGMENT_MM  # noqa: E402
 from mt4_sim.scene import physics_dt  # noqa: E402
 from mt4_sim.chain import (  # noqa: E402
     TCP_GRIP_Z_MM,
+    FINGER_ARMATURE_KG,
     FINGER_DAMPING_N_S_PER_M,
     FINGER_EFFORT_N,
     FINGER_JOINT_NAMES,
@@ -72,6 +74,7 @@ from mt4_sim.chain import (  # noqa: E402
 )
 from mt4_jog.kinematics import ik_position, ws_j4_deg  # noqa: E402
 
+LIFT_MM = 40.0
 CUBE_KG = 0.008
 FINGER_KG = 0.02
 SUBSTEP_S = 1.0 / 240.0
@@ -81,10 +84,12 @@ SUBSTEP_S = 1.0 / 240.0
 # cube moving fast and far. So this does not police motion during the close; it
 # polices where the cube ends up.
 MAX_CUBE_SPEED_M_S = 1.5  # a squaring cube reaches ~0.6; past this it is launched
-# Cube centre versus the TCP once the jaws are shut. The jaws are not coupled to
-# each other, so whichever reaches the cube first can walk it across the gripper
-# before the other arrives; past ~16 mm a 20 mm cube has less than half a blade
-# under it and the grasp is not one you would trust through a move.
+# Cube centre versus the TCP once the jaws are shut. The jaws are coupled but
+# deliberately softly (see `chain.FINGER_COUPLING_STIFFNESS`), so whichever
+# reaches the cube first still walks it some way across the gripper before the
+# other arrives; past ~16 mm a 20 mm cube has less than half a blade under it
+# and the grasp is not one you would trust through a move. The worst mis-aim in
+# this set lands at 2.9 mm.
 GRIP_CAPTURE_MM = 16.0
 GAP_TOLERANCE_MM = 2.0  # how far the gap may sit from the cube's own span
 # How far the wrist can be mis-aimed and still have the jaws pull the cube
@@ -160,7 +165,12 @@ def _drive_report(stage) -> None:
             f"c={drive.GetDampingAttr().Get()} "
             f"Fmax={drive.GetMaxForceAttr().Get()}"
         )
-    critical = 2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * FINGER_KG)
+    # The inertia the drive works against is the armature, not the blade's own
+    # mass -- that is what armature means. Sizing zeta off FINGER_KG alone
+    # reports 1.68 for a drive that is actually at 0.42, which is the error that
+    # let the jaws ring; see FINGER_DAMPING_N_S_PER_M.
+    effective_kg = FINGER_KG + FINGER_ARMATURE_KG
+    critical = 2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * effective_kg)
     print(
         f"  grip force = the {FINGER_EFFORT_N:.1f} N cap (the host closes past "
         f"contact, so the spring always saturates); cube weight = "
@@ -254,7 +264,7 @@ def main() -> int:
     near = park_pose()
     arm.set_gripper_s(GRIPPER_S_OPEN, teleport=True)
 
-    hover_raw = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM + 40.0, near=near)
+    hover_raw = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM + LIFT_MM, near=near)
     grip_raw = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM, near=hover_raw or near)
     if hover_raw is None or grip_raw is None:
         print("FAIL: IK missed the hover or grip pose")
@@ -340,15 +350,26 @@ def main() -> int:
         return 1
 
     # -- the lift ----------------------------------------------------------
-    lift_raw = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM + 40.0, near=grip)
+    lift_raw = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM + LIFT_MM, near=grip)
     if lift_raw is None:
         print("FAIL: IK missed the lift")
         app.close()
         return 1
     lift = _with_yaw(lift_raw, cube.yaw_deg, cube.x_mm, cube.y_mm)
-    for _ in range(240):
+    # Walk the TCP up one `CART_SEGMENT_MM` per step, which is the fastest the
+    # firmware can lift: `mp`/`mq` chop a straight world line into 2 mm segments
+    # and solve each, so 2 mm per 60 Hz tick is its ceiling.
+    #
+    # Handing the drives the whole 40 mm at once instead is not a hard version
+    # of this test, it is a different one. Measured: the TCP covers 122 -> 161
+    # mm in five steps, touching 0.42 m/s, and the cube's own inertia levers the
+    # jaws open -- gap 19.7 -> 26.0 mm -- and throws it out. Nothing the host
+    # can send produces that acceleration.
+    for step in range(240):
         arm.set_gripper_s(GRIPPER_S_CLOSED)
-        arm.set_model_angles(lift)
+        height = min(LIFT_MM, CART_SEGMENT_MM * (step + 1))
+        rung = ik_position(cube.x_mm, cube.y_mm, TCP_GRIP_Z_MM + height, near=grip)
+        arm.set_model_angles(_with_yaw(rung, cube.yaw_deg, cube.x_mm, cube.y_mm))
         world.step(render=False)
 
     (_x2, _y2, z2), yaw2 = _pose_mm(cube_prim)
