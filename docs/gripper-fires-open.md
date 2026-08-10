@@ -167,6 +167,78 @@ This is a mitigation standing in for a constraint the runtime will not provide.
 If a future runtime honours `PhysxMimicJointAPI` on articulation DOFs, that is
 strictly better and the drive can go back to being stiff.
 
+## What actually replaced it: limit the pair, not the blade
+
+*Added 2026-08-10. The section above is the design this superseded; its diagnosis
+of the coordinate is unchanged and is the reason the current one is shaped the
+way it is.*
+
+The soft spring bought the midpoint by giving up two things that turned out not
+to need giving up.
+
+**It made the grip force depend on the object.** `k` was pinned at 150 N/m
+because the grip was `k` times the opening the object left — 1.5 N on a 20 mm
+cube, 0.75 N on a 10 mm one — for a machine whose entire behaviour is "stall at
+the torque limit".
+
+**It made the jaws ring.** At `k = 150` critical damping is 13.9 and the tracking
+budget allowed `c = 4`, so ζ = 0.29. An open to `g 140` overshot by **7.11 mm of
+gap and rang for 0.43 s through seven reversals**. Measure it at the open stop
+and you see nothing at all — the blade is against its travel limit and *cannot*
+overshoot — which is why this sat unnoticed.
+
+Both come off the same observation. **The per-joint clamp is what destroys
+`mid`, not the limiting.** So limit the pair instead: `SimArm._servo_command`
+clamps how far the loop's reference may lead the blades' *mean* opening, and
+hands both blades that one target. The sum splits,
+
+    F_left + F_right = 2k*clip(error)   the servo, at its torque limit
+    F_left - F_right = -2k*mid          the scissor, full k, never clipped
+
+so the grip is the torque limit whatever the object, and the midpoint keeps its
+restoring term at a stiffness the spring design could not afford.
+
+The ringing needed the second half: **feed the reference's rate forward**, so the
+drive damps `v - rate` rather than `v`. The `c*rate/k` lag is what made this file
+say ζ > 1 was unreachable, and it is an artifact of driving a servo with position
+alone. Rate is the servo's own signal.
+
+| drive | midpoint range | grip | ramp lag | overshoot | settle | reversals |
+|---|---|---|---|---|---|---|
+| k=1000, cap 1.5 N | 12.8 mm | 1.50 N | — | — | — | — |
+| k=150, cap 6.0 N | 0.5 mm | 1.46 N | 9.03 mm | 7.11 mm | 0.43 s | 7 |
+| **servo, k=600** | **0.17 mm** | **1.50 N** | **1.28 mm** | **1.24 mm** | **0.067 s** | **0** |
+
+Two things bound the servo, both worth knowing before touching it:
+
+* **Wind-up is a speed limit.** The reference leads by at most one wind-up
+  length, so a blade advances at most that far per step: the ceiling is
+  `F_grip / (k*dt)`. At `k = 1000` that is 0.090 m/s against the firmware's
+  0.096 m/s sweep and the jaws fall behind for the whole ramp — 5.6 mm of it.
+  `k = 600` clears it by 1.57x.
+* **The rate fed forward has to be the reference's, not the host's.** Stalled on
+  a cube the reference is pinned and its rate falls to zero on its own; the
+  host's does not, and 3.8 N of `c*rate` on a 1.5 N grip is not a grip. Feeding
+  it forward only while unsaturated fails the other way — a sweep is saturated
+  for most of its length, so the drive pushes a constant `F` against its own
+  damper and tops out at `F/c`, 0.037 m/s, which is the old speed floor back
+  again.
+
+**`physxJoint:jointFriction` was measured here too**, since a geared servo is
+non-backdrivable and friction would hold `mid` for free. It is honoured but only
+barely: 3.0 N takes the open overshoot from 7.11 mm to 6.13 mm and does not slow
+the close at all, where 3 N of Coulomb friction should stop a blade the drive is
+pushing with 1 N outright. Nothing is built on it.
+
+**What it costs.** The torque limit is symmetric, as a servo's is, so the jaws
+push *out* of an obstruction with 1.5 N where the soft spring could reach its
+6 N cap. Replaying a run whose pick had already missed — the host lowers a shut,
+empty gripper onto the cube already on the column, and the blades end up inside
+it — the spring shoves the cube 6 mm aside and opens, and the servo stalls at a
+13 mm gap. Both are recovering from an interpenetration rather than doing
+physics; six live trials never reached the state. It is the thing to look at
+first if a run ever wedges with the jaws part-open.
+
 ## Two measurements that were lying
 
 Both were found by numbers disagreeing with runs already watched, which is the

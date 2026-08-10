@@ -57,9 +57,17 @@ DROP_MM = 8.0
 # gripper the answer is zero and not approximately zero: one servo drives both
 # blades through a symmetric scissor, so the midpoint is a weld, not a
 # tolerance. The number here is only the solver's own noise floor -- with the
-# jaw drives held off their force cap the midpoint measures +/- 0.17 mm, so 1 mm
-# is well clear of numerical slop and well under the excursions this catches.
+# servo's torque limit applied to the pair rather than to each blade, a replayed
+# place-down measures -0.117 .. +0.056 mm, so 1 mm is well clear of numerical
+# slop and well under the excursions this catches.
 MIDPOINT_TOL_MM = 1.0
+# What separates a capture from a walk. The widest capture measured over ten
+# trials is 3.32 mm and every one is back inside MIDPOINT_TOL_MM within 0.20 s;
+# the failures this catches are 8-12.8 mm and hold for seconds. Both thresholds
+# therefore sit with ~1.5x either side of a gap that is an order of magnitude
+# wide, which is the only reason picking them is not a judgement call.
+MIDPOINT_PEAK_MM = 5.0
+MIDPOINT_YIELD_S = 1.5
 
 
 def load(path: str) -> list[dict]:
@@ -89,9 +97,9 @@ def check_gap_obeys_command(rows: list[dict]) -> bool:
 
     The naive form of this -- ``gap <= target + margin`` -- fires thousands of
     times on a perfectly good run, and writing it that way first is instructive.
-    The jaws are a constant-force closer: the host commands *past* contact, so a
-    gap of 19.7 mm against a commanded 0.00 is the correct reading for a 20 mm
-    cube held properly. Resting above the target is the normal case.
+    The jaws are a servo stalled at its torque limit: the host commands *past*
+    contact, so a gap of 19.7 mm against a commanded 0.00 is the correct reading
+    for a 20 mm cube held properly. Resting above the target is the normal case.
 
     What is not normal is a gap wider than anything in the scene. Nothing here
     is broader than a cube, so while the gripper is commanded shut the blades
@@ -177,18 +185,51 @@ def check_jaw_midpoint_fixed(rows: list[dict]) -> bool:
     Distinct from ``check_no_jaw_pinned_open``, which catches only the end of
     that walk, and from ``check_gap_obeys_command``, which by construction
     cannot see it -- the gap is exactly what a sideways walk leaves alone.
+
+    **What it must not fire on is a capture.** Written as "every step stays
+    inside MIDPOINT_TOL_MM" this failed a run that built its column perfectly:
+    a pick aims at a *detected* cube position, 5.4 mm off on average, so one
+    blade reaches the cube before the other and the pair yields while closing
+    on it. That give is the thing that captures an off-centre cube instead of
+    squeezing it out sideways -- README argues for it at length -- and it is
+    over as soon as the cube is off the desk. Measured on marker 3, the same
+    pick under both drives:
+
+        drive                peak mid   back inside 1 mm after
+        k=150 soft spring     3.32 mm          0.15 s
+        servo, k=600          1.26 mm          0.20 s
+
+    So the property of a correct run is not "never yields". It is **yields and
+    comes back**: an excursion is a violation when it is bigger than a capture
+    can produce, or when it lasts long enough to be a walk rather than a yield.
+    The failures this exists for are both -- the transit walk reaches 12.8 mm,
+    and the place-down slide holds 8 mm for seconds while the arm descends.
     """
     t = col(rows, "t")
     left, right = col(rows, "left_mm"), col(rows, "right_mm")
-    bad = [
-        (t[i], (left[i] - right[i]) / 2.0, left[i], right[i])
-        for i in range(len(t))
-        if abs(left[i] - right[i]) / 2.0 > MIDPOINT_TOL_MM
-    ]
+    mid = [(left[i] - right[i]) / 2.0 for i in range(len(t))]
+
+    bad = []
+    i = 0
+    while i < len(mid):
+        if abs(mid[i]) <= MIDPOINT_TOL_MM:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(mid) and abs(mid[j + 1]) > MIDPOINT_TOL_MM:
+            j += 1
+        peak = max(mid[i : j + 1], key=abs)
+        held_s = t[j] - t[i]
+        if abs(peak) > MIDPOINT_PEAK_MM or held_s > MIDPOINT_YIELD_S:
+            bad.append((t[i], peak, held_s))
+        i = j + 1
+
     return report(
-        f"jaw midpoint stays within {MIDPOINT_TOL_MM:.0f} mm of the wrist",
+        f"jaw midpoint yields no more than {MIDPOINT_PEAK_MM:.0f} mm and returns "
+        f"inside {MIDPOINT_YIELD_S:.1f} s",
         bad,
-        lambda b: f"t={b[0]:8.2f}s  mid {b[1]:+6.2f} mm  (left {b[2]:6.2f} right {b[3]:6.2f})",
+        lambda b: f"t={b[0]:8.2f}s  mid peaked {b[1]:+6.2f} mm, "
+                  f"outside {MIDPOINT_TOL_MM:.0f} mm for {b[2]:5.2f}s",
     )
 
 

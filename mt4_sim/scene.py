@@ -25,7 +25,14 @@ from mt4_sim.arm import (
     define_physics_material,
     prepare_gripper_contacts,
 )
-from mt4_sim.chain import DESK_Z_MM, MM, park_pose, urdf_from_model
+from mt4_sim.chain import (
+    DESK_Z_MM,
+    MM,
+    PHYSICS_HZ,
+    park_pose,
+    physics_dt,  # noqa: F401  (re-exported: callers import it from here)
+    urdf_from_model,
+)
 from mt4_sim.markers import quiet_zone_fraction, write_tag_textures
 
 WORLD = "/World"
@@ -36,12 +43,9 @@ ARM_PATH = f"{WORLD}/MT4"
 # ``PhysxSceneAPI.timeStepsPerSecond`` says -- so every entry point has to pass
 # ``physics_dt=physics_dt()`` or the scene silently runs at whatever World
 # defaults to rather than what it is authored for.
-PHYSICS_HZ = 60.0
-
-
-def physics_dt() -> float:
-    """The physics step every ``World`` in this project must be built with."""
-    return 1.0 / PHYSICS_HZ
+#
+# Both are re-exported from ``mt4_sim.chain``, which is where they are defined
+# and why. Callers keep importing them from here.
 
 
 # Cube on desk: a plastic cube on a wood top, and the number the gripper cares

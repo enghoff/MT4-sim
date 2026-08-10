@@ -43,10 +43,10 @@ from mt4_sim.paths import ARM_USD, ASSETS, URDF  # noqa: E402
 # <dynamics damping>, ignoring override_joint_damping. See mt4_sim.urdf.
 ARM_STIFFNESS = 12000.0
 
-# The jaws are the exception: a grasp holds by squeezing, so the finger drives
-# are deliberately soft and force-limited. N per metre; matched to
-# ``mt4_sim.chain.FINGER_STIFFNESS_N_PER_M``. The host closes past contact, so
-# the spring always saturates and the grip force is the drive's force cap.
+# The jaws are the exception: they are a servo, and this is its position loop's
+# gain. N per metre; matched to ``mt4_sim.chain.FINGER_STIFFNESS_N_PER_M``. The
+# grip force is not this times anything -- ``SimArm`` limits how far the loop
+# may wind up, so a close past contact stalls at the servo's torque limit.
 FINGER_STIFFNESS = FINGER_STIFFNESS_N_PER_M
 
 from isaacsim import SimulationApp  # noqa: E402

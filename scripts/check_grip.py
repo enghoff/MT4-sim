@@ -63,9 +63,10 @@ from mt4_sim.chain import (  # noqa: E402
     FINGER_ARMATURE_KG,
     FINGER_DAMPING_N_S_PER_M,
     FINGER_EFFORT_N,
-    FINGER_GRIP_ERROR_M,
+    FINGER_GRIP_FORCE_N,
     FINGER_JOINT_NAMES,
     FINGER_STIFFNESS_N_PER_M,
+    FINGER_WINDUP_M,
     MAX_SPAN_MM,
     GRIPPER_S_CLOSED,
     GRIPPER_S_OPEN,
@@ -173,27 +174,29 @@ def _drive_report(stage) -> None:
     # let the jaws ring; see FINGER_DAMPING_N_S_PER_M.
     effective_kg = FINGER_KG + FINGER_ARMATURE_KG
     critical = 2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * effective_kg)
-    # The grip is the spring, not the cap. Reporting the cap here read "6.0 N"
-    # three lines above a measured press of 1.49 N, which is the kind of number
-    # that gets quoted later. The cap is still worth printing -- as the headroom
-    # it is, because a drive that reaches it loses the jaws' midpoint.
-    grip_n = FINGER_STIFFNESS_N_PER_M * FINGER_GRIP_ERROR_M
-    peak_n = FINGER_STIFFNESS_N_PER_M * (0.5 * MAX_SPAN_MM * 1e-3)
+    # The grip is the servo's torque limit, not the drive's cap and no longer
+    # k times an error that depends on the object. Reporting the cap here once
+    # read "6.0 N" three lines above a measured press of 1.49 N, which is the
+    # kind of number that gets quoted later. The cap is still worth printing --
+    # as the headroom it is, because a drive that reaches it loses the midpoint.
+    grip_n = FINGER_GRIP_FORCE_N
     print(
-        f"  grip force = k * the opening the object leaves = {grip_n:.2f} N on a "
-        f"20 mm cube; cube weight = {CUBE_KG * 9.81:.3f} N "
-        f"({grip_n / (CUBE_KG * 9.81):.0f}x)"
+        f"  grip force = the servo's torque limit = {grip_n:.2f} N on anything "
+        f"more than {2000 * FINGER_WINDUP_M:.1f} mm inside the commanded opening; "
+        f"cube weight = {CUBE_KG * 9.81:.3f} N ({grip_n / (CUBE_KG * 9.81):.0f}x)"
     )
     print(
-        f"  force cap {FINGER_EFFORT_N:.1f} N vs the {peak_n:.2f} N the spring asks "
-        f"for at the open stop -> {'never clips' if peak_n < FINGER_EFFORT_N else 'CLIPS'}"
+        f"  wind-up {1000 * FINGER_WINDUP_M:.2f} mm -> the blades cannot sweep faster "
+        f"than {FINGER_WINDUP_M / (1.0 / 60.0):.3f} m/s (firmware asks 0.096)"
+    )
+    print(
+        f"  backstop cap {FINGER_EFFORT_N:.1f} N vs the {grip_n:.2f} N the position "
+        f"loop can ask for -> {1000 * grip_n * SUBSTEP_S / effective_kg:.1f} mm/s of "
+        f"kick per substep"
     )
     print(
         f"  damping zeta = {FINGER_DAMPING_N_S_PER_M / critical:.2f}; "
-        f"worst-case kick F*dt/m = "
-        f"{peak_n * SUBSTEP_S / effective_kg:.2f} m/s per substep; "
-        f"command lag = "
-        f"{1000 * FINGER_DAMPING_N_S_PER_M * 0.096 / FINGER_STIFFNESS_N_PER_M:.2f} mm/jaw"
+        f"the rate is fed forward, so this costs no tracking"
     )
 
 

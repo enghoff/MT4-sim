@@ -30,10 +30,12 @@ from mt4_sim.chain import (
     FINGER_DAMPING_N_S_PER_M,
     FINGER_DYNAMIC_FRICTION,
     FINGER_EFFORT_N,
+    FINGER_GRIP_FORCE_N,
     FINGER_JOINT_NAMES,
     FINGER_MAX_SPEED_M_S,
     FINGER_STATIC_FRICTION,
     FINGER_STIFFNESS_N_PER_M,
+    FINGER_WINDUP_M,
     GRIPPER_S_CLOSED,
     GRIPPER_S_OPEN,
     JointAnglesDeg,
@@ -41,6 +43,7 @@ from mt4_sim.chain import (
     finger_positions_for_s,
     model_from_urdf,
     park_pose,
+    physics_dt,
     urdf_from_model,
 )
 from mt4_sim.urdf import JOINTS
@@ -103,14 +106,20 @@ class SimArm:
         self._finger_dofs = [names.index(n) for n in FINGER_JOINT_NAMES]
         self._gripper_s = float(GRIPPER_S_CLOSED)
         self._commanded: JointAnglesDeg | None = None
+        # The reference the servo handed the drive last step. It feeds the
+        # difference forward as a rate, so it needs the step it will be advanced
+        # by -- which is the one every entry point in this project builds its
+        # ``World`` with, not whatever ``World`` would default to.
+        self._finger_dt = physics_dt()
+        self._finger_reference: float | None = None
         self._configure_finger_drives()
         self._configure_finger_pads()
 
     def _configure_finger_drives(self) -> None:
-        """Set the jaw drives to the soft, force-capped spring the grip needs.
+        """Write the servo's loop gains and its backstop cap onto the jaws.
 
         The USD may still carry an older import's numbers, so rewriting here
-        means a rebuild is not required for the grip force to take effect --
+        means a rebuild is not required for a gain change to take effect --
         only for the URDF's own effort/damping attributes to agree.
         """
         configure_finger_joints(self._art.prim.GetStage(), prim_path=self._prim_path)
@@ -127,11 +136,20 @@ class SimArm:
 
     # -- commanding -------------------------------------------------------
 
-    def _drive(self, positions: np.ndarray, dof_indices: list[int]) -> None:
+    def _drive(
+        self,
+        positions: np.ndarray,
+        dof_indices: list[int],
+        velocities: np.ndarray | None = None,
+    ) -> None:
         from isaacsim.core.utils.types import ArticulationAction
 
         self._art.apply_action(
-            ArticulationAction(joint_positions=positions, joint_indices=dof_indices)
+            ArticulationAction(
+                joint_positions=positions,
+                joint_velocities=velocities,
+                joint_indices=dof_indices,
+            )
         )
 
     def set_model_angles(self, q: JointAnglesDeg, *, teleport: bool = False) -> None:
@@ -171,41 +189,102 @@ class SimArm:
         """Command the gripper by firmware S value (120 open .. 285 closed).
 
         Firmware S is open-loop and goes straight to the host's close command,
-        the same as the real board. So does the finger drive: the host closes
-        *past* contact (S=255 is a negative span, clamped to zero), the drive's
-        position error against an object is therefore always large, and the
-        force cap is what the object actually feels. The jaws are a
-        constant-force closer at ``FINGER_EFFORT_N``, which is how the real
-        servo behaves when it stalls.
+        the same as the real board. What follows it here is a servo, not a
+        spring: a stiff position loop whose output saturates at
+        ``FINGER_GRIP_FORCE_N``, so the host closing *past* contact (S=255 is a
+        negative span, clamped to zero) leaves the jaws pressing at the torque
+        limit rather than at ``k`` times an error that depends on the object.
 
-        This deliberately does not track contact and hold a position short of
-        it. That was tried: it grips an aligned cube the same, and drops a
-        misaligned one, because a cube rotating flat under the jaws pushes them
-        apart and a latched target never follows it back in.
+        The limit is applied to the pair, not to each blade, and that is the
+        whole trick -- see ``mt4_sim.chain``. The wind-up clamp is measured
+        against the blades' *mean* opening, so it limits the force the servo
+        puts through the gap while leaving the term that holds the pair's
+        midpoint on the wrist unclamped and at full stiffness. Clamping each
+        blade separately instead -- which is what the drive's own ``maxForce``
+        does -- zeroes that term and the pair walks out from under the wrist.
+
+        Nothing here is latched. The target is recomputed from the measured
+        opening every step, so a cube that rotates flat and pushes the blades
+        apart is followed rather than abandoned; a latched target short of
+        contact was tried and drops exactly that cube.
         """
         if not GRIPPER_S_OPEN <= s <= GRIPPER_S_CLOSED:
             raise ValueError(f"gripper S must be {GRIPPER_S_OPEN}-{GRIPPER_S_CLOSED} (got {s})")
         self._gripper_s = float(s)
-        positions = np.asarray(finger_positions_for_s(s), dtype=float)
+        commanded = float(finger_positions_for_s(s)[0])
         if teleport:
+            positions = np.asarray(finger_positions_for_s(s), dtype=float)
             self._art.set_joint_positions(positions, joint_indices=self._finger_dofs)
             self._art.set_joint_velocities(
                 np.zeros(len(self._finger_dofs)), joint_indices=self._finger_dofs
             )
-        self._drive(positions, self._finger_dofs)
+            self._finger_reference = commanded
+            self._drive(positions, self._finger_dofs, np.zeros(len(self._finger_dofs)))
+            return
+        target, rate = self._servo_command(commanded)
+        self._drive(
+            np.full(len(self._finger_dofs), target),
+            self._finger_dofs,
+            np.full(len(self._finger_dofs), rate),
+        )
+
+    def _servo_command(self, commanded_m: float) -> tuple[float, float]:
+        """The jaw target and rate to hand the drive, as a servo would.
+
+        Two pieces, both of which a servo controller has and a bare position
+        drive does not:
+
+        * **the torque limit**, as a limit on how far the loop's own reference
+          may lead the measured position. Measured against the *mean* opening,
+          so it bounds the force through the gap and leaves the term that holds
+          the midpoint alone -- that is the whole design, and ``set_gripper_s``
+          says why.
+        * **rate feed-forward**. A drive damping ``v`` alone has to generate
+          ``c*rate`` from position error just to sustain a sweep, and that lag
+          is what used to bound the damping, and so the ringing. Damping
+          ``v - rate`` costs nothing, so the loop can be damped for the armature
+          it actually carries.
+
+        The rate fed forward is the **reference's**, not the host's. That
+        distinction is the difference between this working and not. Sweeping
+        free, the reference is the command and the two are the same. Stalled on
+        a cube, the reference is pinned one wind-up length ahead of blades that
+        are not moving, so its rate falls to zero on its own -- where feeding
+        the host's rate forward would drive the blades into the cube with an
+        extra ``c*rate`` for as long as the host went on advancing S past
+        contact, and 3.8 N of that on a 1.5 N grip is not a grip.
+
+        Feeding it forward only while *un*saturated does not work either, and
+        the failure is instructive: a sweep is saturated for most of its length,
+        so the drive is left pushing a constant ``F`` against its own damper and
+        tops out at ``F/c`` -- 0.037 m/s against the 0.096 m/s the firmware
+        sweeps at, measured as 26 mm of lag. The old speed floor, back again.
+        """
+        left, right = self.finger_positions()
+        half_gap = 0.5 * (left + right)
+        error = commanded_m - half_gap
+        target = half_gap + max(-FINGER_WINDUP_M, min(FINGER_WINDUP_M, error))
+
+        previous, self._finger_reference = self._finger_reference, target
+        if previous is None:
+            return target, 0.0
+        # Clamped to the jaw's own speed limit: the reference jumps by up to a
+        # wind-up length in the step where the loop saturates, and that step's
+        # difference is not a rate anything is going to travel at.
+        rate = (target - previous) / self._finger_dt
+        return target, max(-FINGER_MAX_SPEED_M_S, min(FINGER_MAX_SPEED_M_S, rate))
 
     def grip_force_n(self) -> float:
-        """What the harder-pressed jaw is pushing with (N).
+        """What each jaw is pushing with (N).
 
-        The drive is a spring to the commanded opening, clipped at the force
-        cap, so this is ``min(Fmax, k * how far the jaw is from its target)``.
-        Against any object it reads the cap, which is the point.
+        The servo's position loop against the opening the object leaves, cut off
+        at its torque limit -- so against anything more than ``2 *
+        FINGER_WINDUP_M`` narrower than the commanded opening it reads
+        ``FINGER_GRIP_FORCE_N``, which is the point of a torque-limited servo.
         """
-        targets = finger_positions_for_s(self._gripper_s)
-        behind = max(
-            finger - target for finger, target in zip(self.finger_positions(), targets)
-        )
-        return min(FINGER_EFFORT_N, FINGER_STIFFNESS_N_PER_M * max(0.0, behind))
+        left, right = self.finger_positions()
+        held_open = 0.5 * (left + right) - finger_positions_for_s(self._gripper_s)[0]
+        return min(FINGER_GRIP_FORCE_N, FINGER_STIFFNESS_N_PER_M * max(0.0, held_open))
 
     def move_to_tcp(self, x_mm: float, y_mm: float, z_mm: float, *, j4_deg: float | None = None):
         """Solve the control repo's own position IK and drive there.

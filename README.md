@@ -325,8 +325,11 @@ the attribute it just wrote.
 **`PhysxSceneAPI.timeStepsPerSecond` does not set the step rate.**
 `isaacsim.core.api.World` takes its own `physics_dt` and ignores what the stage
 says, so the scene silently ran at whatever `World` defaulted to.
-`scene.physics_dt()` is the single source every entry point passes in, and
-`scene.PHYSICS_HZ` is the one place to change it.
+`chain.physics_dt()` is the single source every entry point passes in, and
+`chain.PHYSICS_HZ` is the one place to change it. It lives in `chain` rather
+than `scene` because the jaw servo's speed ceiling is measured in wind-up per
+step, and the checks that assert that bound run without the Kit runtime that
+importing `scene` needs. `scene` re-exports both.
 
 ### Why the gripper can shove a cube square
 
@@ -338,12 +341,14 @@ just jam on its corners, and none of them is the grip force:
   its corners at a 27 mm gap; at 0.35 and below it slides and turns. Plastic on
   wood is 0.2–0.4, so the physical value and the working value agree — the old
   1.1 was rubber-on-rubber, chosen when the grip was weak and needed the help.
-- **Jaw armature** (`chain.FINGER_ARMATURE_KG`). A drive clipped at `maxForce`
-  has no damping left — the `c·v` term is clipped with it — so it becomes a
-  constant-force actuator that bounces off contact at `F·dt/m` per step. On a
-  20 g blade at 60 Hz that is 1.25 m/s, and the jaws chatter instead of pushing.
-  Armature is the servo's reflected rotor inertia, which is real and dominates
-  the blade's own mass; 0.30 kg makes the contact quiet enough to do work.
+- **Jaw armature** (`chain.FINGER_ARMATURE_KG`). Armature is the servo's
+  reflected rotor inertia, which is real and dominates the blade's own mass;
+  0.30 kg makes the contact quiet enough to do work. It was introduced against a
+  drive clipped at `maxForce`, which has no damping left — the `c·v` term is
+  clipped with it — so it became a constant-force actuator that bounced off
+  contact at `F·dt/m` per step, 1.25 m/s on a 20 g blade at 60 Hz. The drive no
+  longer clips, so that argument no longer stands on its own; the measured one
+  below does.
 - **Jaw speed** (`chain.FINGER_MAX_SPEED_M_S`) *used* to matter, and no longer
   does. With the short jaws the only thing that could turn a misaligned cube was
   the *momentum* of a fast blade, and dropping the ceiling to 0.12 m/s stopped
@@ -355,12 +360,12 @@ Measured on a cube 20° off square: it turns 20.0° of 20 and ends face-gripped 
 
 ### The armature moved the damping, and nobody moved it back
 
-*This is the derivation for the drive that came before the current one —
-`k = 1000 N/m`, `c = 15`, a 1.5 N cap that the jaws sat on whenever they gripped.
-The measurements are sound and the reasoning about armature still holds; what
-changed is the drive it was reasoning about. The current one is `k = 150`,
-`c = 4`, cap 6.0 N, and it is kept off its cap deliberately — see the jaw
-coupling section below for why. What carried over and what did not is at the end
+*This is the derivation for a drive two designs back — `k = 1000 N/m`, `c = 15`,
+a 1.5 N cap that the jaws sat on whenever they gripped. The measurements are
+sound and the reasoning about armature still holds; what changed is the drive it
+was reasoning about. The current one is a servo — `k = 600`, `c = 40`, the
+torque limit applied to the pair rather than to each blade — and the section
+after this one is that design. What carried over and what did not is at the end
 of this section.*
 
 Adding that armature quietly invalidated the number next to it. The jaw drive's
@@ -414,19 +419,91 @@ pinned at the 0.15 m/s velocity ceiling and `c = 15` spends none.
 
 **What carried over.** The armature argument — that the inertia the drive
 accelerates is `FINGER_ARMATURE_KG`, not the blade's 20 g — is the durable part,
-and it is still the reason ζ is low: at `k = 150` critical damping is 13.9, so
-`c = 4` is ζ = 0.29. The jaws-cycling failure is still this knob and not the
-coupling.
+and it is still what sets ζ. The jaws-cycling failure is still this knob and not
+the coupling.
 
-**What did not.** The speed floor is gone. `F/c` was the terminal speed of a jaw
-*saturating* its cap, and the current drive never saturates; its closing speed is
-`k·x/c`, 0.25 m/s at the open stop against the 0.096 m/s the firmware sweeps at.
-What replaced it as the bound on `c` is command tracking — a position drive
-following a ramp lags by `c·rate/k`, which is 2.6 mm per jaw here — and that is
-what `tests/test_chain.py` asserts now, in place of the `F/c` floor. The same
-test used to assert the drive was at least critically damped; that was only ever
-true against the bare blade, and this section is the reason why, so asserting it
-was a false claim passing. It now asserts the tracking bound and a ζ floor.
+**What did not.** Both bounds on `c` are gone, and with them the conclusion.
+`F/c` was the terminal speed of a jaw *saturating* its cap, and no drive since
+saturates per joint. Command tracking replaced it — a position drive following a
+ramp lags by `c·rate/k` — and that was the bound that made **ζ > 1 unreachable**,
+which is the claim this section ends on and the reason the jaws rang.
+
+That bound was an artifact of driving a servo with position alone. Feed the
+commanded rate forward and the drive damps `v − rate` instead of `v`; the drag
+term the lag was paying for is gone, and damping stops costing tracking at all.
+Measured on the same open, `c = 13.9` lags 15.73 mm without feed-forward and
+3.51 mm with it. ζ = 1.44 is where the drive sits now, and `tests/test_chain.py`
+asserts ζ > 1 — the thing the drive is actually for — in place of both.
+
+### The jaws are a servo, and the torque limit is on the pair
+
+The real gripper is one servo driving a symmetric scissor. It runs a position
+loop; when the blades meet the object the loop cannot null its error, the motor
+saturates, and the jaws become a **constant-force actuator at the servo's torque
+limit** — a force that does not depend on how wide the object is.
+
+Modelling that is not the same as writing `maxForce` on the drive, and the
+difference is the whole design. A PhysX drive clamps *per joint*, and the pair
+has two coordinates: `gap = left + right`, which the servo drives, and
+`mid = (left − right)/2`, which the scissor welds to the wrist. Both blades
+closing sit on the same cap in opposite directions, so the restoring term on
+`mid` is not weak but **identically zero** — 0.001 N measured, against 1.5 N on
+each blade — and the pair walks out from under the wrist carrying the payload.
+That is the next section.
+
+So the limit is applied to the gap and not to each blade. `SimArm.set_gripper_s`
+limits how far the loop's reference may lead the blades' *mean* opening:
+
+    half_gap = (left + right) / 2
+    error    = commanded − half_gap
+    target   = half_gap + clip(error, ±FINGER_WINDUP_M)      # both blades
+
+Handing both blades that one target splits cleanly into the two modes:
+
+    F_left + F_right = 2k·clip(error)   the servo, limited to the torque limit
+    F_left − F_right = −2k·mid          the scissor, full stiffness, never clipped
+
+which is the actual machine: a force-limited actuator on the coordinate it
+drives, structure on the coordinate it does not. The drive's own `maxForce` stays
+slack at 20 N and is a numerical backstop — a drive that reaches it is a drive
+whose midpoint term has gone to zero. Nothing is latched: the target is
+recomputed from the measured opening every step, so a cube that rotates flat and
+pushes the blades apart is followed rather than abandoned.
+
+**Two things this buys that the soft spring did not.** The grip is one number —
+1.5 N on anything more than 5 mm inside the commanded opening, where before it
+was `k` times the opening the object left, so 1.5 N on a 20 mm cube but 0.75 N
+on a 10 mm one. And the loop can be damped for the armature it carries, because
+the rate is fed forward, so the ringing is gone. On an open to `g 140` — the S
+the host actually sends, not the open stop, where a blade against its travel
+limit cannot overshoot at all:
+
+| drive | ramp lag | overshoot | settle | reversals |
+|---|---|---|---|---|
+| k=150, c=4 (was) | 9.03 mm | **7.11 mm** | 0.43 s | 7 |
+| **k=600, c=40, servo** | **1.28 mm** | **1.24 mm** | 0.067 s | 0 |
+
+**Wind-up is a speed limit as well as a force limit**, and that is what bounds
+the loop gain. The reference may lead the blades by at most `FINGER_WINDUP_M`, so
+a blade can advance at most one wind-up length per physics step: the ceiling is
+`FINGER_GRIP_FORCE_N / (k·dt)`. At `k = 1000` that is 0.090 m/s against the
+firmware's 0.096 m/s sweep, and the jaws fall behind for the whole length of the
+ramp — 5.6 mm of it, measured. `k = 600` clears the sweep by 1.57×, and
+`tests/test_chain.py` asserts the margin.
+
+**`physxJoint:jointFriction` was measured too**, since a geared servo is
+non-backdrivable and friction would hold `mid` for free. It is honoured, but only
+just: 3.0 N of it takes the open overshoot from 7.11 mm to 6.13 mm and does not
+slow the close at all, where 3 N of Coulomb friction should stop a blade the
+drive is pushing with 1 N outright. Nothing is built on it.
+
+**What it costs.** The torque limit is symmetric, as a servo's is, so the jaws
+can push *out* of an obstruction with 1.5 N where the old drive could use its
+whole 6 N cap. That shows up only in a degenerate state — replaying a run whose
+pick had already missed, the host lowers a shut and empty gripper onto the cube
+already on the column, and the blades end up inside it. The old drive shoves the
+cube 6 mm aside and opens; this one stalls at a 13 mm gap. Both are recovering
+from the same interpenetration, and the live trials below never reach it.
 
 ### The jaws are two blades that should be one mechanism
 
@@ -455,9 +532,14 @@ cap.** Two position drives to a common target restore the midpoint with
 `-2k*mid`. Clipped to the same cap in opposite directions they sum to nothing —
 measured at 0.001 N against 1.5 N on each side — so a saturating grip leaves the
 pair a free 0.6 kg mass with no spring and no damper, keeping whatever sideways
-velocity a move onset hands it. That is why the drive is now a soft spring kept
-clear of its cap rather than the constant-force closer it used to be; see the jaw
-drive section above, and note that the fix costs command tracking.
+velocity a move onset hands it.
+
+That is why the servo's torque limit is applied to the pair rather than to each
+blade: it is exactly the arrangement that limits the grip without ever clipping a
+joint, so `-2k*mid` survives at the full `k`. Replaying a place-down that used to
+walk the pair 10.6 mm, the midpoint now holds to **-0.117 … +0.056 mm**, measured
+two independent ways — from the joint values and from each blade's world origin
+against `gripper_base` — agreeing to 0.0001 mm.
 
 **A solved constraint would be strictly better. This runtime has none.** Three
 were measured, not assumed:
@@ -542,18 +624,24 @@ damping ratio, one section up.
 Software coupling is not a substitute: projecting the pair back onto L = R would
 drive the near jaw straight into the cube it is already touching.
 
-`check_grip.py` passes 5 of 5 on the current drive, with the tendon inert:
+`check_grip.py` passes 7 of 7 on the servo, with the tendon inert:
 
-| case | cube ends, from the TCP | jaw asymmetry | grip | was (k=1000, cap 1.5 N) |
+| case | cube ends, from the TCP | jaw asymmetry | grip | peak cube speed |
 |---|---|---|---|---|
-| square on | 0.09 mm | 0.31 mm | 1.49 N | 0.07 mm / 0.22 mm |
-| +20° mis-aimed | 0.50 mm | 0.03 mm | 1.47 N | 0.40 mm / 0.08 mm |
-| −20° mis-aimed | 2.06 mm | 0.17 mm | 1.48 N | 2.54 mm / 0.19 mm |
-| cube already at 25° | 0.08 mm | 0.21 mm | 1.48 N | 0.10 mm / 0.14 mm |
-| cube already at 30° | 0.07 mm | 0.26 mm | 1.49 N | 0.15 mm / 0.18 mm |
+| square on | 0.23 mm | 0.04 mm | 1.50 N | 0.037 m/s |
+| +8° mis-aimed | 0.52 mm | 0.02 mm | 1.50 N | 0.053 m/s |
+| +12° mis-aimed | 0.68 mm | 0.03 mm | 1.50 N | 0.046 m/s |
+| +20° mis-aimed | 1.93 mm | 0.01 mm | 1.50 N | 0.082 m/s |
+| −20° mis-aimed | 0.99 mm | 0.02 mm | 1.50 N | 0.098 m/s |
+| cube already at 25° | 0.21 mm | 0.02 mm | 1.50 N | 0.042 m/s |
+| cube already at 30° | 0.19 mm | 0.08 mm | 1.50 N | 0.038 m/s |
 
-The mis-aimed cases still turn the cube square — 0 → 19.8° and 0 → −19.5° — so
-the softer spring has not cost the jaws the couple that does that.
+Every mis-aimed case turns the cube square and ends **0.1–0.3° off the jaws**,
+including ±20°, which the previous drive left stably corner-gripped. The grip
+column reading 1.50 N seven times is the torque limit doing what a torque limit
+does. The speed column is the other half: a limited position loop cannot push
+harder than 1.5 N, so the worst shove is 0.098 m/s against the 1.5 m/s at which
+this check calls a cube launched.
 
 Note what this set *cannot* tell you. Every cube here starts at its true
 position, perfectly centred between the blades, and on that the coupling can be
@@ -576,6 +664,42 @@ soft spring's cost is command tracking, ~0.1 s of lag on a free-space close, and
 it buys a 170x reduction in midpoint wander without costing a pick, a level, or
 a millimetre of placement. That lag is real and a bench grip cannot see it —
 this table is what says it does not matter in practice.
+
+The servo was scored the same way, three three-level trials each on marker 2,
+paired against the soft spring it replaces on the same scene and site:
+
+| drive | levels built | missed picks | worst off-axis | strays | invariants |
+|---|---|---|---|---|---|
+| k=150, cap 6.0 N | 3, 3, 3 | 0, 0, 0 | 0.4, 0.2, 0.2 mm | 0, 0, 0 | 2 of 3 clean; one dropped a cube 20 mm at t=93 |
+| **servo, k=600** | 3, 3, 3 | 0, 0, 0 | **0.2, 0.2, 0.1 mm** | 0, 0, 0 | **3 of 3 clean** |
+
+Then three more sites, one trial each, because a site fixes the reach and
+bearing the arm swings through and which cubes it can pick on the way:
+
+| site | levels built | missed picks | worst off-axis | invariants |
+|---|---|---|---|---|
+| marker 0 | 3 | 0 | 0.4 mm | clean |
+| marker 1 | 3 | 0 | 0.3 mm | clean |
+| marker 3 | 3 | 0 | 1.2 mm | clean |
+
+Marker 4 cannot be used and it is the control repo that says so: it sits at
+(205.2, 9.9), under the camera park pose at (200, 0), and `stack_cubes.py`
+refuses it — *the arm parks there between moves and would hit the stack*.
+
+Read the whole set honestly: at three levels both drives stack every time, and
+the trial is not where the servo earns its place — the ringing, the
+width-independent grip and the 0.17 mm midpoint are. What the trials establish
+is that none of it cost a pick, a level, or a millimetre, over four sites, which
+is the thing a bench check cannot say.
+
+They also broke `check_jaw_midpoint_fixed`, which is worth its own line. It
+failed marker 3 on **both** drives, and the old one yielded 2.6x further
+(3.32 mm against 1.26 mm) — because a pick aims at a detected position and the
+pair gives while capturing an off-centre cube, which is the behaviour the
+coupling section argues *for*. The check had been calibrated on a place-down
+replay that contains no capture, so it was asserting something no correct run
+satisfies. It now bounds how far the midpoint yields and how long it takes to
+come back, and still fails the original 12.8 mm walk on both counts.
 
 
 ### The camera *is* the rig's camera
@@ -703,7 +827,7 @@ counters claim versus where the arm was actually left.
 | Faithful | How |
 |---|---|
 | Timing | One step period per master-axis step, so a leg takes as long as it does on the bench; `speed <us>` changes it the same way; gripper S advances at 360 S/s (finger targets) while grip stations still hold for the 180 S/s duration, so closes finish early and settle before the arm lifts |
-| Grip force | The jaws are a constant-force closer: a soft 1000 N/m spring commanded shut, capped at **1.5 N**, so a close past contact stalls at the cap the way the real servo does. That is 19× an 8 g cube's weight — enough to shove a misaligned cube square against the desk — and small enough not to launch it |
+| Grip force | The jaws are a servo: a 600 N/m position loop whose wind-up is limited, so a close past contact stalls at **1.5 N** whatever the object's width, the way a real servo does. That is 19× an 8 g cube's weight — enough to shove a misaligned cube square against the desk — and small enough not to launch it. The limit is applied to the pair, not to each blade, which is what keeps the blades' midpoint on the wrist |
 | Path shape | `mp`/`mq` chop a straight world line into 2 mm segments and solve each with the control repo's own `ik_position`, routing tangent-arc-tangent around the 140 mm keep-out cylinder |
 | Rejections | `err not homed`, `err mp keepout`, `err mp ground z<115.0`, `err mp joints`, `err mq full 8`, `err mq station pose want … at …` — the exact strings the host greps for |
 | Queue semantics | `mq` cold-starts when idle and queues when not, a drained queue emits one `mp done`, `mp` mid-flight overrides and drops the queue, a grip station holds everything until the jaws finish |

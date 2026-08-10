@@ -66,6 +66,21 @@ from mt4_jog.kinematics import (
 
 MM = 0.001
 
+# The physics step every ``World`` in this project is built with.
+#
+# It lives here rather than in ``mt4_sim.scene`` because the jaw servo's design
+# depends on it: the loop's reference may lead the blades by one wind-up length,
+# so the blades cannot sweep faster than ``FINGER_WINDUP_M / dt`` and the step
+# rate is part of that bound. ``scene`` cannot be imported without the Kit
+# runtime, and the checks that assert the bound run without one.
+PHYSICS_HZ = 60.0
+
+
+def physics_dt() -> float:
+    """The physics step every ``World`` in this project must be built with."""
+    return 1.0 / PHYSICS_HZ
+
+
 # `Calibration.table_z` (122) is a **TCP** height: the Z the arm is commanded to
 # in order to grip something lying on the table, measured by touching the tags.
 # It is not where the wood is. The gripper's tongs hang below the TCP, and they
@@ -224,43 +239,60 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
 
 
 # --------------------------------------------------------------------------
-# The jaw drive
+# The jaw drive: a torque-limited servo, not a spring
 # --------------------------------------------------------------------------
 #
-# The jaws are a **soft spring, deliberately kept off its force cap**. The host
-# closes past contact (S=255 is a negative span), so the drive's position error
-# against a gripped object is whatever half-opening that object leaves -- 10 mm
-# for a 20 mm cube -- and the grip force is ``k`` times that.
+# The real gripper is one servo driving a symmetric scissor. It runs a position
+# loop; when the blades meet the object the loop cannot null its error, the
+# motor current saturates, and from then on the jaws are a **constant-force
+# actuator at the servo's torque limit**. That force is what the object feels,
+# and it does not depend on how wide the object is.
 #
-# It used to be the other way round: k was 1000 N/m, the cap was 1.5 N, and the
-# cap *was* the grip force whatever the object's width. That is the tidier model
-# of a servo stalling against its load, and it has one consequence that is not
-# tidy at all. **A saturated pair of jaws cannot hold its own midpoint.** Two
-# position drives to a common target restore the midpoint with -2*k*mid; clipped
-# to the same cap in opposite directions they sum to nothing -- measured at
-# 0.001 N, against 1.5 N on each side. The pair is then a free 0.6 kg mass with
-# no spring and no damper, and it keeps whatever sideways velocity a move onset
-# hands it until a blade reaches a stop. ``check_jaw_midpoint_fixed`` is the
-# assertion; a place-down walks it 9 mm at a dead-constant 11 mm/s, away from
-# the base on 8 of 9 places in a run.
+# Modelling that is not the same as writing ``maxForce`` on the drive, and the
+# difference is the whole reason this section exists. A PhysX drive clamps
+# *per joint*: ``F_i = clip(k*(t - x_i) - c*v_i, +/-Fmax)``. The pair has two
+# coordinates,
 #
-# Off the cap the same drives hold it, and the grip force is unchanged because
-# it was sized from the task and k is now derived from it:
+#     gap = left + right       what the servo actually drives
+#     mid = (left - right)/2   what the scissor welds to the wrist
 #
-#     drive                       midpoint range   grip force   command lag
-#     k 1000, cap 1.5 N (was)        12.8 mm         1.50 N        1.5 mm
-#     k 150,  cap 6.0 N (this)        0.5 mm         1.46 N        5.9 mm
+# and a per-joint clamp destroys the second one. Both blades closing sit on the
+# same cap in opposite directions, so the midpoint restoring term -2*k*mid is
+# not weak but **identically zero** -- measured at 0.001 N against 1.5 N on each
+# blade. The pair becomes a free 0.6 kg mass with no spring and no damper, keeps
+# whatever sideways velocity a move onset hands it, and walks 12.8 mm out from
+# under the wrist carrying the payload with it. ``check_jaw_midpoint_fixed`` is
+# the assertion; docs/gripper-fires-open.md is the investigation.
 #
-# **The cost is command tracking, and it is not tunable away.** A position drive
-# following a ramp lags by c*rate/k, so the softness that buys the midpoint its
-# spring is the softness that makes the jaws trail a commanded sweep -- about
-# 0.1 s late on a free-space close. Damping trades the two directly: c=15 gives
-# 0.36 mm of midpoint against 10.0 mm of lag, c=2.25 gives 0.87 against 5.5.
+# **So the limit is applied to the gap and not to each blade.** ``SimArm``
+# clamps how far the servo's position loop is allowed to wind up, measuring the
+# error against the blades' *mean* opening rather than against each blade:
 #
-# What this is *not* is the best of several workable options. The midpoint is a
-# coordinate the real gripper does not have, and the honest fix is to delete it
-# with a solved constraint rather than to hold it with a stiffer spring. Three
-# were measured and none reaches a reduced-coordinate articulation here:
+#     half_gap = (left + right) / 2
+#     error    = commanded - half_gap
+#     target   = half_gap + clip(error, +/-FINGER_WINDUP_M)      (both blades)
+#
+# Handing both blades that one target splits cleanly into the two modes:
+#
+#     F_left + F_right = 2k*clip(error)   the servo, limited to the torque limit
+#     F_left - F_right = -2k*mid          the scissor, at full stiffness, never
+#                                         clipped
+#
+# which is the actual machine: a force-limited actuator on the coordinate it
+# drives, and structure on the coordinate it does not. The drive's own
+# ``maxForce`` stays slack -- it is a numerical backstop, and a drive that
+# reaches it is a drive whose midpoint term has gone to zero.
+#
+# This is not "track contact and hold a position short of it", which was tried
+# and drops a misaligned cube: a latched target never follows a cube that
+# rotates flat and pushes the blades apart. Nothing is latched here. The target
+# is recomputed from the measured opening every step, so the jaws keep pressing
+# at the torque limit wherever the cube goes -- it is a force source with a
+# leash, not a position.
+#
+# Three real constraints were measured against this articulation first, because
+# deleting ``mid`` outright would be better than managing it, and none of them
+# reaches a reduced-coordinate articulation in this runtime:
 #
 #   * ``PhysxMimicJointAPI`` -- applied and ignored.
 #   * ``PhysxPhysicsRackAndPinionJoint`` -- exact on free rigid bodies (0.000 mm
@@ -270,12 +302,15 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
 #     0.30 kg armature -- the jaws are not held together, they are too heavy to
 #     move apart. Hold the ratio and drop the inertia to 1e-10 and the coupling
 #     vanishes completely: a constraint does not care what the pinion weighs.
-#     At ratio 1e5 the reflected 267 kg stops the jaws closing on a cube at all.
 #   * the fixed tendon -- a force the step integrates, not a constraint, and
-#     there is no band where it helps. Under the drive cap it cannot resist a
-#     1.5 N contact push (k=20 and k=65 are indistinguishable from no tendon);
-#     over it, a one-sided stop rectifies it into the gap (k=600 puts 9.8 N
-#     through the grip). k=200 is worse than nothing on both counts.
+#     there is no band where it helps. See FINGER_COUPLING_STIFFNESS.
+#
+# ``physxJoint:jointFriction`` was measured too, since a geared servo is
+# non-backdrivable and friction would hold ``mid`` for free. It is honoured, but
+# only just: 3.0 N of it takes the open overshoot from 7.11 mm to 6.13 mm and
+# does not slow the close at all, when 3 N of Coulomb friction should stop a
+# blade the drive is pushing with 1 N outright. It is not a force this runtime
+# delivers at the value asked for, so nothing is built on it.
 #
 # The force is sized from the task, not from "as hard as the solver allows".
 # A 20 mm cube is 8 g, so its weight is 0.078 N and:
@@ -287,88 +322,131 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
 # 1.5 N is ~19x the cube's weight and ~40x the static hold requirement, which
 # is margin enough for the arm to fling it around at the accelerations a
 # position drive produces. Going higher buys nothing and costs stability: the
-# velocity a capped drive can inject into a 20 g finger in one substep is
-# ``F * dt / m``, which at 240 Hz is 0.31 m/s here and was **2.5 m/s** at the
-# 12 N cap this replaces. Delivered through a finger into an 8 g cube, that
-# impulse is what threw cubes across the desk.
-#
-# Stiffness and damping only shape the approach, not the grip force. The jaw
-# should settle without ringing, which means zeta comfortably above 1.
-#
-# **The inertia in that sum is FINGER_ARMATURE_KG, not the blade's mass.** This
-# read `2*sqrt(1000 * 0.02) = 8.94, so 12.0 is zeta = 1.34` -- correct when the
-# blade was a bare 20 g, and quietly invalidated when the armature below was
-# added at 0.30 kg. Armature is precisely the inertia the drive has to
-# accelerate, so the effective mass is 0.32 kg, critical damping is
-# 2*sqrt(1000 * 0.32) = 35.8, and 12.0 was **zeta = 0.34** -- an underdamped
-# drive, documented as an overdamped one.
-#
-# That is what made the jaws cycle. The tendon is ~100x stronger than the jaw
-# drives (164 N against a 1.5 N cap), and an arm slew keeps handing the pair
-# differential velocity; a drive at zeta = 0.34 rings on it instead of absorbing
-# it, the swing grows until a blade reaches the end of its travel, and that
-# one-sided stop rectifies it into the jaws walking shut together. Replaying a
-# stacking run's own command stream, with the host holding the gripper *open*
-# the whole time, the threshold is sharp:
-#
-#     drive c    zeta    worst unforced gap error    peak jaw speed
-#      12.0      0.34            33.60 mm            0.1505 m/s (on the cap)
-#      14.0      0.39            12.38               0.1500     (on the cap)
-#     *15.0*     0.42             4.25               0.1096
-#      20.0      0.56             3.78               0.1001
-#      24.0      0.67             3.75               0.0953
-#      48.0      1.34             3.75               0.0877
-#      80.0      2.24             7.66               0.0830
-#
-# **zeta > 1 is not reachable here, and that is a real design tension rather
-# than a tuning preference.** The other end of this drive is a *speed* floor: a
-# jaw saturating the force cap tops out at F/c, and if that is slower than the
-# firmware advances S (~0.096 m/s per jaw at 360 S/s) the jaws lag their own
-# command through a free-space close -- `tests/test_chain.py` asserts exactly
-# that. It bounds c below 15.6, while zeta = 1 wants 35.8. The armature is what
-# opened the gap between them: it is 15x the blade's real mass, chosen so the
-# contact is quiet enough to turn a misaligned cube, and it raises the damping
-# needed for a given zeta without raising the force available to deliver it.
-#
-# So 15.0 is the most damping the sweep-speed floor allows, and it is enough:
-# 8x less unforced gap travel, and the jaws come off the velocity cap, which is
-# the qualitative change -- below 15 they run the whole excursion at 0.15 m/s.
-# Buying the rest would mean raising FINGER_EFFORT_N (that is the grip force,
-# sized from the task) or dropping the armature (that is what makes contact
-# quiet), so it is not free and is not worth it for the remaining 0.5 mm.
-#
-# Fixing this in the *tendon* instead does work on paper and fails in practice:
-# see FINGER_COUPLING_DAMPING. Softening the coupling quiets the jaws too, and
-# costs up to nine missed picks a run, because the coupling's give is what
-# catches a cube the vision stack mislocated. The drive's damping costs nothing,
-# because it was simply mis-derived.
-# Sized from the task above; the spring delivers it now, not the cap. Half the
-# clear opening a 20 mm cube leaves each jaw with the host commanding fully shut
-# is 10 mm, and 1.5 N over 10 mm is 150 N/m.
+# velocity a limited drive can inject into a finger in one substep is
+# ``F * dt / m``, and at the 12 N cap two designs ago that was 2.5 m/s.
+# Delivered through a finger into an 8 g cube, that impulse threw cubes across
+# the desk.
 FINGER_GRIP_FORCE_N = 1.5
-FINGER_GRIP_ERROR_M = 0.010
-FINGER_STIFFNESS_N_PER_M = FINGER_GRIP_FORCE_N / FINGER_GRIP_ERROR_M
-# The cap bounds a transient instead of setting the grip, so it has to stay
-# clear of the most the spring can ever ask for -- k over the full travel,
-# 150 * 0.024535 = 3.68 N. 6.0 leaves 1.6x. A drive that clips is a drive whose
-# midpoint restoring force is zero, which is the whole point of the change.
-FINGER_EFFORT_N = 6.0
-# The midpoint/tracking knee from the table above. zeta = 0.29 at m = 0.32 kg
-# (critical = 13.9). The old F/c speed floor no longer binds, because the drive
-# no longer saturates: its closing speed is k*x/c, 0.25 m/s at the open stop
-# against the 0.096 m/s the firmware sweeps at.
-FINGER_DAMPING_N_S_PER_M = 4.0
+
+# The position loop's gain. With the wind-up clamp above it no longer sets the
+# grip force, so it is free to be what a servo's loop is: stiff. What it buys is
+# the *other* mode -- the midpoint is held with -2*k*mid, so k is the scissor's
+# stiffness as much as the servo's -- and how quickly the torque limit takes
+# over once the blades touch something.
+#
+# It used to be pinned. The grip force was ``k`` times the opening the object
+# left (10 mm for a 20 mm cube), so 1.5 N forced k = 150 N/m and the jaws were a
+# soft spring pretending to be a servo. Two things were wrong with that and both
+# are gone:
+#
+#   * the grip force depended on the object. 1.5 N on a 20 mm cube, but 0.75 N
+#     on a 10 mm one and 2.2 N on a 30 mm one, for a machine whose whole
+#     behaviour is "stall at the torque limit".
+#   * k = 150 with the damping the tracking budget allowed is zeta = 0.29, and
+#     that is the ringing this replaces.
+#
+# **What bounds it now is a speed ceiling, and it is a sharp one.** The loop's
+# reference may never lead the blades by more than ``FINGER_WINDUP_M``, so the
+# blades can never advance more than one wind-up length per physics step: the
+# fastest they can sweep is ``FINGER_WINDUP_M / dt``, which is
+# ``FINGER_GRIP_FORCE_N / (k * dt)``. Too stiff and the jaws simply cannot keep
+# up with the firmware's own 0.096 m/s sweep, and the lag is not a transient --
+# it accumulates for the length of the ramp. Measured on an open to ``g 140``,
+# with everything else held:
+#
+#     k      wind-up   ceiling     ramp lag   overshoot   settle
+#     1000   1.50 mm   0.090 m/s    5.64 mm    1.07 mm    0.067 s   under the sweep
+#      600   2.50 mm   0.150 m/s    1.28 mm    1.24 mm    0.067 s
+#      400   3.75 mm   0.225 m/s    1.40 mm    1.23 mm    0.100 s
+#      300   5.00 mm   0.300 m/s    1.47 mm    1.14 mm    0.117 s
+#
+# 600 is the stiffest that clears the sweep with margin -- 1.57x -- and every
+# softer setting tracks and settles slightly worse while holding the midpoint
+# with a slacker spring. The ceiling is why this is not simply set as high as
+# the solver tolerates.
+FINGER_STIFFNESS_N_PER_M = 600.0
+
+# How far the position loop winds up before the torque limit bites: the servo's
+# error at stall. Anything the blades meet that is more than 2*this narrower
+# than the commanded opening is gripped at exactly FINGER_GRIP_FORCE_N -- at
+# 2.5 mm that is everything in this scene, a 20 mm cube included with 4x to
+# spare.
+#
+# It is also the budget the midpoint has to stay inside. The two blades press at
+# ``k*(windup -/+ mid)``, so a midpoint error of one wind-up length unloads one
+# blade completely and the grip becomes one-sided.
+FINGER_WINDUP_M = FINGER_GRIP_FORCE_N / FINGER_STIFFNESS_N_PER_M
+
+# The drive's own per-joint force ceiling. A **backstop, not the grip**: a drive
+# that reaches it is a drive whose midpoint term has gone to zero, which is the
+# failure the wind-up clamp exists to avoid, so it has to sit above everything
+# the servo legitimately asks for. The spring half is bounded by construction at
+# ``k * FINGER_WINDUP_M`` = FINGER_GRIP_FORCE_N; the damper half is not, because
+# braking is dissipation rather than motor torque, and a blade meeting a cube at
+# sweep speed can ask for ``c * v`` on the way to a stop.
+#
+# Measured over a replayed place-down, the peak per-joint effort is 5.18 N and
+# only 9 steps of 3151 pass 2 N -- all of them the step a blade meets the cube.
+# 20.0 leaves ~4x on the worst of those.
+FINGER_EFFORT_N = 20.0
+
+# The velocity loop's gain, and the fix for the ringing.
+#
+# The jaws used to overshoot an open command by 7.11 mm of gap and ring for
+# 0.43 s through seven reversals, because zeta was 0.29 -- and chain.py said
+# outright that zeta > 1 was unreachable, because a position drive following a
+# ramp lags by ``c*rate/k`` and the firmware sweeps each jaw at 0.096 m/s. More
+# damping bought less ring and more lag, and there was no setting that was good
+# at both.
+#
+# **That trade is an artifact of driving a servo with position alone.** A servo
+# controller feeds the commanded rate forward; only the *error* is left for the
+# loop to work on. PhysX drives take a velocity target and damp ``v - v_target``
+# rather than ``v``, so feeding the sweep rate forward costs nothing and removes
+# the drag term the lag was paying for. ``SimArm.set_gripper_s`` sends it.
+#
+# Measured on an open to ``g 140`` -- the S the host actually sends, not the
+# open stop, where a blade against its travel limit cannot overshoot at all.
+# First the old drive, to show the trade it was stuck in, at k = 150:
+#
+#     drive c   feed-forward   ramp lag   overshoot   settle   reversals
+#      4.0        no            9.03 mm    7.11 mm    0.43 s      7    (was)
+#     13.9        no           15.73       0.00       0.18 s      0
+#      4.0        yes           6.37       8.26       0.53 s      7
+#     13.9        yes           3.51       3.25       0.18 s      1
+#
+# Rows 1 and 2 are the trade: damping enough to stop the ring costs 15.7 mm of
+# lag. Row 4 is the same damping with the rate fed forward -- 4.5x less lag than
+# row 2 and no ring worth the name. Then the servo as it ships, k = 600:
+#
+#     drive c    zeta    ramp lag   overshoot   settle   reversals
+#      15.0      0.54     2.41 mm    2.33 mm    0.050 s     3
+#      25.0      0.90     1.80       1.80       0.067       0
+#     *40.0*     1.44     1.28       1.24       0.067       0
+#      60.0      2.17     0.92       0.82       0.050       0
+#      80.0      2.89     0.72       0.57       0.033       0
+#
+# Everything improves monotonically with c, which is the tell that the tracking
+# cost is gone: it used to be the term that turned this table around. What does
+# not appear here is the cost that picked 40.0 over 80.0 -- the same damper
+# meets the cube, and ``scripts/check_grip.py`` is where that shows up.
+FINGER_DAMPING_N_S_PER_M = 40.0
 
 # Armature: extra inertia in *joint* space, and the thing that makes the above
 # usable at 60 Hz.
 #
-# A drive clipped at ``maxForce`` has no damping left -- the ``c * v`` term is
-# clipped away with the rest -- so in sustained contact it stops being a spring
-# and becomes a constant-force actuator with nothing opposing velocity. It then
-# bounces off the contact at ``F * dt / m`` per step: 1.25 m/s for a 20 g finger
-# at 1.5 N and 60 Hz. Measured, the jaws chattered over ~0.8 mm and the cube's
-# angular velocity swung +/-280 deg/s about zero, so the couple that should have
-# squared the cube up averaged out to nothing.
+# It was introduced against a drive that clipped at ``maxForce``, which has no
+# damping left -- the ``c * v`` term is clipped away with the rest -- so in
+# sustained contact it stopped being a spring and became a constant-force
+# actuator with nothing opposing velocity, bouncing off the contact at
+# ``F * dt / m`` per step: 1.25 m/s for a 20 g finger at 1.5 N and 60 Hz.
+# Measured, the jaws chattered over ~0.8 mm and the cube's angular velocity
+# swung +/-280 deg/s about zero, so the couple that should have squared the cube
+# up averaged out to nothing.
+#
+# That argument no longer applies on its own -- the wind-up clamp limits the
+# force without clipping the drive, so the damper is live at stall too -- but
+# the second argument below is the load-bearing one and is unchanged.
 #
 # This is not a fudge factor. The blade is driven through a geared servo, and a
 # gearbox reflects the rotor's inertia to the output by the square of its ratio,
@@ -556,8 +634,8 @@ __all__ = [
     "FINGER_DAMPING_N_S_PER_M",
     "FINGER_DYNAMIC_FRICTION",
     "FINGER_EFFORT_N",
-    "FINGER_GRIP_ERROR_M",
     "FINGER_GRIP_FORCE_N",
+    "FINGER_WINDUP_M",
     "FINGER_JOINT_NAMES",
     "FINGER_MAX_SPEED_M_S",
     "FINGER_STATIC_FRICTION",
@@ -572,10 +650,12 @@ __all__ = [
     "LINKAGE2",
     "MAX_SPAN_MM",
     "MM",
+    "PHYSICS_HZ",
     "Q_LIMITS",
     "finger_positions_for_s",
     "model_from_urdf",
     "park_pose",
+    "physics_dt",
     "s_for_span_mm",
     "span_mm_for_s",
     "urdf_from_model",

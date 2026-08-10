@@ -336,10 +336,11 @@ def build_urdf() -> ET.ElementTree:
         ET.SubElement(el, "origin", {"xyz": _mm3(joint.origin_mm), "rpy": "0 0 0"})
         ET.SubElement(el, "axis", {"xyz": " ".join(str(a) for a in joint.axis)})
         if joint.kind == "prismatic":
-            # Jaw force cap: enough to rotate an 8 g cube into face alignment,
-            # not enough to crush through it when the host closes past contact.
-            # The velocity ceiling is load-bearing -- see FINGER_MAX_SPEED_M_S
-            # for why a slow jaw stops squaring misaligned cubes up.
+            # The jaw drive's backstop cap, not the grip: the servo's torque
+            # limit is applied by ``SimArm`` to the pair, and this only has to
+            # stay above it (see FINGER_EFFORT_N). The velocity ceiling is
+            # load-bearing -- see FINGER_MAX_SPEED_M_S for why a slow jaw stops
+            # squaring misaligned cubes up.
             lo, hi, eff, vel = 0.0, FINGER_TRAVEL_M, FINGER_EFFORT_N, FINGER_MAX_SPEED_M_S
         else:
             lo, hi = limits[joint.name]
