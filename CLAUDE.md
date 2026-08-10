@@ -1,5 +1,17 @@
 # Working on this repo
 
+## Reporting
+
+Write for someone who does not know this codebase. Lead with what happened and
+what it means; keep it to a few sentences. Name a file, symbol or constant only
+when the reader has to go look at it.
+
+Do not narrate the investigation — no tool-by-tool log, no list of what was
+ruled out. State the finding, the evidence for it, and what is still unknown.
+
+Detail belongs in the scratchpad instruments and their docstrings, not in the
+reply.
+
 ## Measurement
 
 Run `scripts/check_invariants.py` on every log before analysing anything. Add a

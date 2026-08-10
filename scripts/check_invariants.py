@@ -69,6 +69,18 @@ MIDPOINT_TOL_MM = 1.0
 MIDPOINT_PEAK_MM = 5.0
 MIDPOINT_YIELD_S = 1.5
 
+# What counts as one carry in the 10 Hz cube log. A carry moves a cube tens of
+# mm; a neighbour's nudge or a post-release settle moves it a couple. Gaps
+# shorter than a second inside a carry are the arm hesitating, not a second
+# carry.
+CARRY_MM = 15.0
+CARRY_JOIN_S = 1.0
+
+# The control repo, whose vision pipeline decides what counts as a cube. Checked
+# against rather than copied: a duplicated threshold here would drift from the
+# one that actually runs, and then this file would certify a broken pipeline.
+MT4_CONTROL_REPO = Path(__file__).resolve().parents[2] / "MT4"
+
 
 def load(path: str) -> list[dict]:
     with open(path, newline="", encoding="utf-8") as fh:
@@ -287,6 +299,100 @@ def check_payload_not_dropped(rows: list[dict], cubes: list[dict]) -> bool:
     )
 
 
+def cube_carries(cubes: list[dict]) -> dict[str, list[float]]:
+    """When each cube was carried, from the stage rather than from a console.
+
+    A carry is a run of motion; a cube nudged by a neighbour or settling after a
+    release shifts a couple of mm where a carry shifts tens, and gaps shorter
+    than a second are mid-carry hesitation rather than the end of one.
+    """
+    t = col(cubes, "t")
+    out: dict[str, list[float]] = {}
+    for n in [k[:-2] for k in cubes[0] if k.endswith("_x")]:
+        x, y = col(cubes, f"{n}_x"), col(cubes, f"{n}_y")
+        # Every sample interval the cube moved in, then joined into carries:
+        # consecutive intervals belong to the same carry unless the cube was
+        # still for longer than CARRY_JOIN_S in between.
+        steps = [
+            (t[i - 1], t[i], math.hypot(x[i] - x[i - 1], y[i] - y[i - 1]))
+            for i in range(1, len(t))
+            if math.hypot(x[i] - x[i - 1], y[i] - y[i - 1]) > 0.5
+        ]
+        carries: list[tuple[float, float, float]] = []  # (start, end, distance)
+        for t0, t1, d in steps:
+            if carries and t0 - carries[-1][1] <= CARRY_JOIN_S:
+                carries[-1] = (carries[-1][0], t1, carries[-1][2] + d)
+            else:
+                carries.append((t0, t1, d))
+        out[n] = [c[0] for c in carries if c[2] >= CARRY_MM]
+    return out
+
+
+def check_no_cube_stranded(cubes: list[dict]) -> bool:
+    """No cube ends up where the arm can reach it but the vision cannot have it.
+
+    The failure this exists for: a cube is placed somewhere the pipeline will
+    not accept it back, so it silently leaves the pool the planner draws from.
+    Nothing errors. The loop keeps shuffling, on fewer and fewer cubes, and the
+    stranded one also blocks the spot it sits on, because a blob dropped from
+    the pick candidates still counts toward placement clearance. Twice now the
+    cause has been different -- a blob too big for a fixed size ceiling, then a
+    cube read a few mm outside the camera-coverage test -- so this is stated as
+    the property, not as either cause.
+
+    Deliberately not a statistical test on how long a cube sat still. With nine
+    cubes and ~32 carries a run, an innocent cube is quiet for half of it often
+    enough that any per-cube silence threshold fires on good runs: measured, a
+    cube on a low-priority marker sat through 19 carries in a run whose genuine
+    strands sat through 20-25. Ground truth plus the pipeline's own predicates
+    answer the question outright instead.
+
+    Asks the control repo, because the pipeline's opinion is the only one that
+    matters here and a copy of its thresholds would drift from it.
+    """
+    if not cubes:
+        print("  SKIP  no cube stranded (no cube log given)")
+        return True
+    try:
+        sys.path.insert(0, str(MT4_CONTROL_REPO))
+        from mt4_vision.calib import DEFAULT_CALIB_PATH, load_calibration
+        from mt4_vision.workspace import (
+            CUBE_YAW_AREA_SPREAD,
+            expected_cube_area_px2,
+            in_work_region,
+            work_region_block_reason,
+        )
+        from mt4_vision.detect import MAX_BLOB_AREA, MIN_BLOB_AREA
+    except ImportError as exc:
+        print(f"  SKIP  no cube stranded (control repo not importable: {exc})")
+        return True
+
+    calib = load_calibration(DEFAULT_CALIB_PATH)
+    last = cubes[-1]
+    bad = []
+    for n in [k[:-2] for k in cubes[0] if k.endswith("_x")]:
+        x, y = float(last[f"{n}_x"]), float(last[f"{n}_y"])
+        # Could the arm work here at all? If not, the cube being unreachable is
+        # not this check's business -- it never should have been placed there,
+        # which is a different failure with a different check.
+        if work_region_block_reason(x, y, calib, require_camera=False) is not None:
+            continue
+        area = expected_cube_area_px2(x, y, calib)
+        if area * CUBE_YAW_AREA_SPREAD > MAX_BLOB_AREA:
+            bad.append((n, x, y, area, f"images {area:.0f}px2, over the "
+                                       f"{MAX_BLOB_AREA:.0f}px2 the detector keeps"))
+        elif area / CUBE_YAW_AREA_SPREAD < MIN_BLOB_AREA:
+            bad.append((n, x, y, area, f"images {area:.0f}px2, under the "
+                                       f"{MIN_BLOB_AREA:.0f}px2 the detector keeps"))
+        elif not in_work_region(x, y, calib):
+            bad.append((n, x, y, area, work_region_block_reason(x, y, calib)))
+    return report(
+        "no cube left where the arm can reach it but the vision cannot",
+        bad,
+        lambda b: f"{b[0]} at ({b[1]:.0f},{b[2]:.0f}): {b[4]}",
+    )
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__)
@@ -301,6 +407,7 @@ def main(argv: list[str]) -> int:
             check_no_jaw_pinned_open(rows),
             check_jaw_midpoint_fixed(rows),
             check_payload_not_dropped(rows, cubes),
+            check_no_cube_stranded(cubes),
         ]
     )
     print("  ALL PASS" if ok else "  VIOLATIONS ABOVE")
