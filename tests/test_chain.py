@@ -250,46 +250,91 @@ class GripperSpanModel(unittest.TestCase):
             left, right = finger_positions_for_s(s)
             self.assertAlmostEqual(1.0 * left + -1.0 * right, 0.0, places=12)
 
-    def test_the_grip_force_is_the_cap_not_the_spring(self):
-        """The host closes past contact, so the drive always saturates.
+    def test_the_grip_force_is_the_spring_not_the_cap(self):
+        """The drive must NOT saturate, and this is why.
 
-        That is the whole grip model: whatever the object's width, the position
-        error against it is large and the jaws press with FINGER_EFFORT_N.
+        This assertion used to run the other way -- the host closes past contact,
+        so the error is large, so the force is always the cap and the cap *is*
+        the grip. True, and it costs the jaws their midpoint: two drives clipped
+        to the same cap in opposite directions restore the pair's midpoint with
+        exactly zero force, and the pair walks out from under the wrist. So the
+        cap has to stay clear of everything the spring can ask for, and the grip
+        force comes from k times the opening the object leaves.
         """
         from mt4_sim.chain import (
             FINGER_EFFORT_N,
+            FINGER_GRIP_ERROR_M,
+            FINGER_GRIP_FORCE_N,
             FINGER_STIFFNESS_N_PER_M,
             GRIPPER_S_CLOSED,
+            MAX_SPAN_MM,
             finger_positions_for_s,
         )
 
         # Jaws stopped on a 20 mm cube while the host commands fully shut.
         target = finger_positions_for_s(GRIPPER_S_CLOSED)[0]
         self.assertEqual(target, 0.0)
-        spring_n = FINGER_STIFFNESS_N_PER_M * (0.010 - target)
-        self.assertGreater(spring_n, FINGER_EFFORT_N)
+        spring_n = FINGER_STIFFNESS_N_PER_M * (FINGER_GRIP_ERROR_M - target)
+        self.assertAlmostEqual(spring_n, FINGER_GRIP_FORCE_N, places=9)
+        self.assertLess(spring_n, FINGER_EFFORT_N)
+
+        # And not at any opening either: a jaw at its open stop is the largest
+        # error the drive ever sees, and even that has to stay under the cap.
+        widest_n = FINGER_STIFFNESS_N_PER_M * (0.5 * MAX_SPAN_MM * 1e-3)
+        self.assertLess(widest_n, FINGER_EFFORT_N)
 
     def test_grip_force_is_sized_for_the_cube_not_the_solver(self):
         from mt4_sim.chain import (
+            FINGER_ARMATURE_KG,
             FINGER_DAMPING_N_S_PER_M,
-            FINGER_EFFORT_N,
+            FINGER_GRIP_FORCE_N,
             FINGER_STIFFNESS_N_PER_M,
+            MAX_SPAN_MM,
         )
 
         cube_weight_n = 0.008 * 9.81
         # Enough: a friction hold needs N * mu >= mg/2 per pad, mu ~ 1.1, and
         # the arm accelerates the cube as well as carrying it.
-        self.assertGreater(FINGER_EFFORT_N, 10.0 * cube_weight_n)
-        # Not too much: the velocity a capped drive can inject into a 20 g
-        # finger in one 240 Hz substep is what launches a gripped cube. At the
-        # 12 N this replaces it was 2.5 m/s, and cubes were thrown across the
-        # desk.
-        finger_kg, substep_s = 0.02, 1.0 / 240.0
-        self.assertLess(FINGER_EFFORT_N * substep_s / finger_kg, 0.5)
+        self.assertGreater(FINGER_GRIP_FORCE_N, 10.0 * cube_weight_n)
 
-        # And the drive must settle rather than ring: at least critically damped.
-        critical = 2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * finger_kg)
-        self.assertGreaterEqual(FINGER_DAMPING_N_S_PER_M, critical)
+        # Not too much: the velocity a drive can inject into a 20 g finger in
+        # one 240 Hz substep is what launches a gripped cube. At the 12 N cap
+        # two designs ago it was 2.5 m/s and cubes were thrown across the desk.
+        #
+        # Two things in that sum were wrong and are corrected here rather than
+        # relaxed. The force is the most the drive can actually deliver, which
+        # is no longer FINGER_EFFORT_N -- the cap is deliberately slack and the
+        # spring never reaches it -- so it is k over the full travel. And the
+        # inertia is the armature, not the bare blade: FINGER_ARMATURE_KG is
+        # precisely the mass the drive has to accelerate, which is the argument
+        # that fixed the damping derivation in chain.py and never reached this
+        # test. Both were left as they were for a design that saturated.
+        peak_n = FINGER_STIFFNESS_N_PER_M * (0.5 * MAX_SPAN_MM * 1e-3)
+        driven_kg, substep_s = FINGER_ARMATURE_KG + 0.02, 1.0 / 240.0
+        self.assertLess(peak_n * substep_s / driven_kg, 0.5)
+
+        # And the damping. This used to assert "at least critically damped",
+        # which was only ever true against the bare blade: at the armature-
+        # inclusive mass the drive has always been underdamped, and chain.py
+        # says outright that zeta > 1 is not reachable here. Asserting it anyway
+        # made a false claim pass, so assert the thing that actually bounds c in
+        # this design instead.
+        #
+        # The old bound was a speed floor, F/c, and it is gone with saturation.
+        # What replaced it is tracking: a position drive following a ramp lags
+        # by c*rate/k, and the firmware advances each jaw at ~0.096 m/s, so too
+        # much damping leaves the jaws arriving after the host has moved on.
+        from mt4_sim.firmware.state import GRIPPER_SWEEP_RATE_S_PER_S  # noqa: F401
+
+        jaw_sweep_m_s = 0.096
+        lag_m = FINGER_DAMPING_N_S_PER_M * jaw_sweep_m_s / FINGER_STIFFNESS_N_PER_M
+        self.assertLess(lag_m, 0.005)
+        # Underdamped, but not so far that it rings: zeta at the mass the drive
+        # actually accelerates.
+        zeta = FINGER_DAMPING_N_S_PER_M / (
+            2.0 * math.sqrt(FINGER_STIFFNESS_N_PER_M * (FINGER_ARMATURE_KG + 0.02))
+        )
+        self.assertGreater(zeta, 0.2)
 
     def test_jaws_close_faster_than_the_firmware_sweeps(self):
         """Terminal closing speed under the force cap is F/c.

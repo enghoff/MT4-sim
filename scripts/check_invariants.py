@@ -53,6 +53,14 @@ IN_JAWS_MM = 30.0
 # Falling further than this is a drop, not settling onto a stack.
 DROP_MM = 8.0
 
+# How far the midpoint of the two blades may sit from the wrist. On the real
+# gripper the answer is zero and not approximately zero: one servo drives both
+# blades through a symmetric scissor, so the midpoint is a weld, not a
+# tolerance. The number here is only the solver's own noise floor -- with the
+# jaw drives held off their force cap the midpoint measures +/- 0.17 mm, so 1 mm
+# is well clear of numerical slop and well under the excursions this catches.
+MIDPOINT_TOL_MM = 1.0
+
 
 def load(path: str) -> list[dict]:
     with open(path, newline="", encoding="utf-8") as fh:
@@ -140,18 +148,74 @@ def check_no_jaw_pinned_open(rows: list[dict]) -> bool:
     )
 
 
+def check_jaw_midpoint_fixed(rows: list[dict]) -> bool:
+    """The blades' midpoint stays on the wrist.
+
+    ``left`` and ``right`` are half-gaps on two prismatic joints that share an
+    origin on ``gripper_base`` and both count positive outward, so the pair has
+    two coordinates and only one of them is held:
+
+        gap = left + right      the drives hold this
+        mid = (left - right)/2  nothing holds this
+
+    ``mid`` is where the pair sits along the grip axis, measured from J4. The
+    real gripper cannot move it at all. This one can, and does: both blades
+    slide the same way, the gap does not change, and the whole assembly walks
+    sideways under the wrist while the payload goes with it.
+
+    The reason it is free is worth stating, because it is not the tendon. Two
+    position drives to a common target *do* restore the midpoint, with force
+    -2*k*mid -- but only while they can still modulate their force. Gripping,
+    the host commands S=255, which is a negative span, so both drives are hard
+    against ``FINGER_EFFORT_N`` and cannot push any harder on one side than the
+    other. Two equal forces in opposite directions sum to nothing, and the
+    restoring term is not weak but identically zero. The pair is then a free
+    mass carrying ``FINGER_ARMATURE_KG`` on each side with no spring and no
+    damper: whatever sideways velocity a transient hands it, it keeps, until a
+    blade reaches a travel stop.
+
+    Distinct from ``check_no_jaw_pinned_open``, which catches only the end of
+    that walk, and from ``check_gap_obeys_command``, which by construction
+    cannot see it -- the gap is exactly what a sideways walk leaves alone.
+    """
+    t = col(rows, "t")
+    left, right = col(rows, "left_mm"), col(rows, "right_mm")
+    bad = [
+        (t[i], (left[i] - right[i]) / 2.0, left[i], right[i])
+        for i in range(len(t))
+        if abs(left[i] - right[i]) / 2.0 > MIDPOINT_TOL_MM
+    ]
+    return report(
+        f"jaw midpoint stays within {MIDPOINT_TOL_MM:.0f} mm of the wrist",
+        bad,
+        lambda b: f"t={b[0]:8.2f}s  mid {b[1]:+6.2f} mm  (left {b[2]:6.2f} right {b[3]:6.2f})",
+    )
+
+
 def check_payload_not_dropped(rows: list[dict], cubes: list[dict]) -> bool:
-    """A cube held in a shut gripper does not lose altitude.
+    """A cube held in a shut gripper does not lose altitude *of its own*.
 
     The check the transit drops needed. It is deliberately about the *cube*
     rather than the jaws: whatever the gap does, a cube that was in the gripper
     and is now on the desk was dropped, and that is true without knowing why.
+
+    The qualifier is load-bearing and its absence made this check useless. "Held
+    in a shut gripper and losing altitude" describes a drop and it also describes
+    every place-down ever commanded -- the gripper lowers 24 mm onto the column
+    with the cube gripped the whole way. Written without it, this counted one
+    violation per level: nine a run for an eight-high stack plus a clearing hop,
+    on runs that placed all nine cubes perfectly. That is what made the drop rate
+    look flat at ~50 per 100 grip-closes across every tendon setting while the
+    real figure went 4 -> 13 -> 0.
+
+    So the fall has to be one the TCP did not make with it.
     """
     if not cubes:
         print("  SKIP  payload never dropped (no cube log given)")
         return True
     jt = col(rows, "t")
     js, jx, jy = col(rows, "s"), col(rows, "tcp_x"), col(rows, "tcp_y")
+    jz = col(rows, "tcp_z")
     ct = col(cubes, "t")
     names = [k[:-2] for k in cubes[0] if k.endswith("_x")]
     bad = []
@@ -165,16 +229,20 @@ def check_payload_not_dropped(rows: list[dict], cubes: list[dict]) -> bool:
                     j += 1
                 if z[i - 1] - z[j] > DROP_MM:
                     k = min(bisect.bisect_left(jt, ct[i - 1]), len(jt) - 1)
+                    k2 = min(bisect.bisect_left(jt, ct[j]), len(jt) - 1)
                     held = math.hypot(x[i - 1] - jx[k], y[i - 1] - jy[k]) < IN_JAWS_MM
-                    if js[k] > SHUT_S and held:
-                        bad.append((ct[i - 1], n, z[i - 1], z[j]))
+                    # What the cube lost that the gripper did not lower it by.
+                    own = (z[i - 1] - z[j]) - (jz[k] - jz[k2])
+                    if js[k] > SHUT_S and held and own > DROP_MM:
+                        bad.append((ct[i - 1], n, z[i - 1], z[j], own))
                 i = j + 1
             else:
                 i += 1
     return report(
         "no cube falls out of a shut gripper",
         bad,
-        lambda b: f"t={b[0]:8.2f}s  {b[1]} fell {b[2]:.0f} -> {b[3]:.0f} mm",
+        lambda b: f"t={b[0]:8.2f}s  {b[1]} fell {b[2]:.0f} -> {b[3]:.0f} mm"
+                  f"  ({b[4]:.0f} mm of it its own)",
     )
 
 
@@ -190,6 +258,7 @@ def main(argv: list[str]) -> int:
             check_gap_obeys_command(rows),
             check_jaw_speed(rows),
             check_no_jaw_pinned_open(rows),
+            check_jaw_midpoint_fixed(rows),
             check_payload_not_dropped(rows, cubes),
         ]
     )

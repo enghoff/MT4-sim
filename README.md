@@ -355,6 +355,14 @@ Measured on a cube 20° off square: it turns 20.0° of 20 and ends face-gripped 
 
 ### The armature moved the damping, and nobody moved it back
 
+*This is the derivation for the drive that came before the current one —
+`k = 1000 N/m`, `c = 15`, a 1.5 N cap that the jaws sat on whenever they gripped.
+The measurements are sound and the reasoning about armature still holds; what
+changed is the drive it was reasoning about. The current one is `k = 150`,
+`c = 4`, cap 6.0 N, and it is kept off its cap deliberately — see the jaw
+coupling section below for why. What carried over and what did not is at the end
+of this section.*
+
 Adding that armature quietly invalidated the number next to it. The jaw drive's
 damping was sized as `2·√(k·m) = 2·√(1000 × 0.02) = 8.94`, so `c = 12` was
 recorded as ζ = 1.34 — correct for a bare 20 g blade. But armature *is* the
@@ -404,98 +412,171 @@ differing:
 Over a whole run, including the commanded sweeps, `c = 12` spends 15 steps
 pinned at the 0.15 m/s velocity ceiling and `c = 15` spends none.
 
-### The jaws are coupled, as far as 60 Hz allows
+**What carried over.** The armature argument — that the inertia the drive
+accelerates is `FINGER_ARMATURE_KG`, not the blade's 20 g — is the durable part,
+and it is still the reason ζ is low: at `k = 150` critical damping is 13.9, so
+`c = 4` is ζ = 0.29. The jaws-cycling failure is still this knob and not the
+coupling.
+
+**What did not.** The speed floor is gone. `F/c` was the terminal speed of a jaw
+*saturating* its cap, and the current drive never saturates; its closing speed is
+`k·x/c`, 0.25 m/s at the open stop against the 0.096 m/s the firmware sweeps at.
+What replaced it as the bound on `c` is command tracking — a position drive
+following a ramp lags by `c·rate/k`, which is 2.6 mm per jaw here — and that is
+what `tests/test_chain.py` asserts now, in place of the `F/c` floor. The same
+test used to assert the drive was at least critically damped; that was only ever
+true against the bare blade, and this section is the reason why, so asserting it
+was a false claim passing. It now asserts the tracking bound and a ζ floor.
+
+### The jaws are two blades that should be one mechanism
 
 The real gripper is a scissor: one servo drives both blades through a symmetric
-linkage, so the blades cannot move independently and **their midpoint is pinned
+linkage, so the blades cannot move independently and **their midpoint is welded
 to J4**. A cube the jaws close on is pushed to the centre rather than walked
-across the gripper by whichever blade reaches it first. On the two prismatic
-axes that whole constraint is `q_left - q_right = 0`, because both joints have
-their origin at the TCP and both count positive outward.
+across the gripper by whichever blade reaches it first.
 
-It is authored as a PhysX **fixed tendon** over the two axes — gearings +1 and
-−1, rest length zero — by `arm.couple_finger_joints`, at scene-build time
-because PhysX reads tendons when it creates the articulation.
+The model does not have that mechanism. It has two independent prismatic joints
+sharing an origin on `gripper_base` — which *is* the J4 frame — with axes
+`(0,+1,0)` and `(0,−1,0)`. So the pair carries two coordinates and only one of
+them is held:
 
-Two things about this are easy to get wrong, both measured rather than assumed:
+    gap = left + right       the drives hold this
+    mid = (left - right)/2   nothing holds this
 
-- **`PhysxMimicJointAPI` is applied and then ignored by this runtime.** It is the
-  obvious tool and it is present in the schema. Told left = 0 and right = 24.5,
-  the jaws go to exactly 0.00 / 24.50 with the mimic applied — identical to no
-  constraint at all, for the `transY` and `linear` axis tokens alike.
+`mid` is a degree of freedom the hardware does not have, and it moves: up to
+12.8 mm, both tongs together, the gap unchanged, away from the base on 8 of 9
+place-downs in a run. `scripts/check_invariants.py` asserts against it, and
+`docs/gripper-fires-open.md` is the investigation — the gripper firing fully open
+while commanded shut, and cubes dropped in mid-transit, are both this coordinate
+reaching the end of its travel.
+
+**What holds it is the jaw drives, and only while they stay off their force
+cap.** Two position drives to a common target restore the midpoint with
+`-2k*mid`. Clipped to the same cap in opposite directions they sum to nothing —
+measured at 0.001 N against 1.5 N on each side — so a saturating grip leaves the
+pair a free 0.6 kg mass with no spring and no damper, keeping whatever sideways
+velocity a move onset hands it. That is why the drive is now a soft spring kept
+clear of its cap rather than the constant-force closer it used to be; see the jaw
+drive section above, and note that the fix costs command tracking.
+
+**A solved constraint would be strictly better. This runtime has none.** Three
+were measured, not assumed:
+
+- **`PhysxMimicJointAPI` is applied and then ignored.** It is the obvious tool
+  and it is present in the schema. Told left = 0 and right = 24.5, the jaws go to
+  exactly 0.00 / 24.50 with the mimic applied — identical to no constraint at
+  all, for the `transY` and `linear` axis tokens alike.
+- **`PhysxPhysicsRackAndPinionJoint` is exact on free rigid bodies and inert on
+  articulation DOFs.** Ramp one rack and an undriven one mirrors it to 0.000 mm.
+  On the finger joints it *looks* like it works at ratio ≥ 1e4 — and that is not
+  the constraint, it is the pinion's inertia reflected to the rack as
+  `I * ratio²`, which at ratio 1e4 lands 2.7 kg on a 0.30 kg armature. The jaws
+  are not held together, they are too heavy to move apart; at ratio 1e5 the
+  reflected 267 kg stops them closing on a cube at all. Hold the ratio and drop
+  the inertia to 1e-10 and the coupling vanishes completely. Sweeping the ratio
+  hides this; sweeping the inertia at a fixed ratio shows it.
+- **A fixed tendon is a force the step integrates, not a constraint it solves.**
+  It settles where it balances the jaw drives rather than holding
+  `q_left = q_right` outright.
+
+The tendon is still authored — by `arm.couple_finger_joints`, at scene-build
+time, because PhysX reads tendons when it creates the articulation — and its
+stiffness and damping are **zero**. It is kept because it is the right *model*
+and the wrong *mechanism*, and because the shape of the authoring is what a
+working constraint would need. Two things about it are easy to get wrong and were
+measured:
+
 - **A fixed tendon spans the *subtree* of the joint it is rooted on.** The two
   finger joints are siblings, so a tendon rooted on one cannot reach the other:
   that arrangement drags the rooted jaw to the rest length and leaves the other
   exactly where it was told. It has to be rooted on a common ancestor —
   `j4_wrist_roll` — carrying gearing 0 so the wrist stays out of the sum.
+- **There is no stiffness at which it helps.** Under the drive's force budget it
+  cannot resist a 1.5 N contact push; over it, a one-sided stop absorbs the
+  reaction on one blade and the force reappears on the other as *gap*, which is
+  the grip. Measured with damping off, on a recorded place-down:
 
-**And it is deliberately soft — the softness is load-bearing.** The tendon is a
-force the step integrates rather than a constraint it solves, so it settles
-where it balances the jaw drives. Told left = 0 and right = 24.5 mm against
-drives capped at 1.5 N, the residual separation reads how hard it pulls:
-
-| stiffness | residual separation | damping (at k = 3e5) | residual |
+| tendon `k` | midpoint range | grip force | |
 |---|---|---|---|
-| **3e4** | **3.38 mm** | c = 100 | 0.24 mm |
-| 1e5 | 1.12 mm | **c = 400** | **0.47 mm** |
-| 3e5 | 0.47 mm | c = 1500 | 1.32 mm |
-| 1e6 | 0.25 mm | c = 5000 | 4.02 mm |
+| 0 | 12.8 mm | 1.50 N | the defect the drive now fixes |
+| 20 | 12.5 mm | 1.50 N | inert |
+| 65 | 12.5 mm | 1.50 N | inert — the top of the force budget |
+| 200 | 14.7 mm | p95 2.34 N | worse than nothing |
+| 600 | 9.9 mm | max 9.83 N | rectifying into the gap |
 
-Solver iteration count changes none of it — 8, 16, 32, 64 and 128 all settle at
-the same figure — and halving the physics step halves the separation. Note that
-**damping makes it worse**, because it drags on the motion that closes the gap
-and not only on the ringing; a stiff tendon with heavy damping bolted on to keep
-it stable is the worst of both, and that pairing is what dropped cubes.
+Damping is worse still at every stiffness, because it drags on the motion that
+closes the gap and not only on the ringing: at k = 3e5, c = 100 leaves 0.24 mm of
+residual separation and c = 5000 leaves 4.02 mm. A stiff tendon with heavy
+damping bolted on to keep it stable is the worst of both, and that pairing —
+3e4/400 — is what fired the gripper open and dropped cubes in transit.
 
-At 3e4/400 the pair visibly rocks, and **that give is load-bearing.** It is
-tempting to remove it, because doing so quiets the jaws and makes
-`check_grip.py` look immaculate — asymmetry closes to 0.04–0.05 mm against the
-0.20–0.26 here. It also costs picks, and the cost is steep. Repeated three-level
-`stack_cubes.py` runs, varying only the tendon damping:
+**The history here is worth keeping, because it argued the opposite.** While the
+tendon was live at 3e4/400 the pair visibly rocked, and that give was measured to
+be load-bearing — repeated three-level `stack_cubes.py` runs, varying only the
+tendon damping:
 
 | tendon `c` | missed picks per run | stacks built |
 |---|---|---|
-| **400** | 0, 0, 0, 0, 0, 0 | 6 of 6 |
+| 400 | 0, 0, 0, 0, 0, 0 | 6 of 6 |
 | 80 | 1, 1, 0 | 3 of 3 |
 | 20 | 1, 2, 2 | 3 of 3 |
 | 0 | 2, 9, 9, 9 | 3 of 4 |
 
-Stiffening does the same thing: at k = 1e6 a run missed nine and walked a green
-cube from (91, 262) to (115, 151) across the desk. The difference is what the
-jaws close on — `check_grip.py` puts the cube at its true position, perfectly
-centred, where a rigid symmetric pair grips it beautifully, but a real pick aims
-at a *detected* position, 5.4 mm off on average and 11 mm at worst, and a rigid
-pair meeting an off-centre cube squeezes it out sideways instead of capturing
-it. The give is the gripper accommodating vision error.
+— and stiffening did the same thing: at k = 1e6 a run missed nine and walked a
+green cube from (91, 262) to (115, 151) across the desk. The reading at the time
+was that the give is the gripper accommodating vision error, since a real pick
+aims at a *detected* position 5.4 mm off on average and 11 mm at worst, and a
+rigid pair meeting an off-centre cube squeezes it out sideways.
 
-So the way to earn a stiffer tendon is better cube positions rather than firmer
-jaws. Passing `check_grip.py` is not sufficient evidence on its own — a stacking
-run is what shows this, and single runs are not enough either: outcomes vary
-enough run to run that both of these settings have a clean run in them.
+That reading was half right. The give does accommodate vision error. What it also
+did was let the pair walk out from under the wrist, and the missed picks at
+`c = 0` were the *uncoupled* pair walking rather than a too-rigid one ejecting
+cubes. With the drive held off its force cap the pair stays centred without a
+tendon at all, and the tendon-off runs build eight-high columns with zero missed
+picks — which no tendon setting ever managed.
 
 **The jaws cycling is not this knob.** Softening the coupling does quiet them,
 which is what makes it such an attractive wrong answer. The cause is the drive's
-damping ratio, one section up, and fixing it there costs nothing.
+damping ratio, one section up.
 
 Software coupling is not a substitute: projecting the pair back onto L = R would
 drive the near jaw straight into the cube it is already touching.
 
-With the tongs at their correct length and the tendon in, the whole
-`check_grip.py` set passes:
+`check_grip.py` passes 5 of 5 on the current drive, with the tendon inert:
 
-| case | cube ends, from the TCP | jaw asymmetry |
-|---|---|---|
-| square on | 0.07 mm | 0.22 mm |
-| +20° mis-aimed | 0.40 mm | 0.08 mm |
-| −20° mis-aimed | 2.54 mm | 0.19 mm |
-| cube already at 25° | 0.10 mm | 0.14 mm |
-| cube already at 30° | 0.15 mm | 0.18 mm |
+| case | cube ends, from the TCP | jaw asymmetry | grip | was (k=1000, cap 1.5 N) |
+|---|---|---|---|---|
+| square on | 0.09 mm | 0.31 mm | 1.49 N | 0.07 mm / 0.22 mm |
+| +20° mis-aimed | 0.50 mm | 0.03 mm | 1.47 N | 0.40 mm / 0.08 mm |
+| −20° mis-aimed | 2.06 mm | 0.17 mm | 1.48 N | 2.54 mm / 0.19 mm |
+| cube already at 25° | 0.08 mm | 0.21 mm | 1.48 N | 0.10 mm / 0.14 mm |
+| cube already at 30° | 0.07 mm | 0.26 mm | 1.49 N | 0.15 mm / 0.18 mm |
+
+The mis-aimed cases still turn the cube square — 0 → 19.8° and 0 → −19.5° — so
+the softer spring has not cost the jaws the couple that does that.
 
 Note what this set *cannot* tell you. Every cube here starts at its true
 position, perfectly centred between the blades, and on that the coupling can be
 made arbitrarily rigid and the numbers only improve — which is exactly how a
-setting that costs nine picks a run passes with 0.04 mm of asymmetry. The
-asymmetry column is a floor, not a verdict.
+setting that cost nine picks a run passed with 0.04 mm of asymmetry. The
+asymmetry column is a floor, not a verdict, and a stacking run is what shows the
+difference.
+
+So here is the stacking run. Three recorded eight-level trials on marker 0 per
+drive, same scene and same site, scored by `scripts/check_invariants.py` — the
+violation columns are raw counts over a whole run:
+
+| drive | levels built | missed picks | worst off-axis | midpoint | jaw pinned on a stop | drops |
+|---|---|---|---|---|---|---|
+| k=1000, cap 1.5 N | 8, 8, 8 | 0, 0, 0 | 3.4, 2.4, 1.7 mm | 2162, 2084, 2123 | 7, 6, 8 | 0, 0, 0 |
+| **k=150, cap 6.0 N** | 8, 8, 8 | 0, 0, 0 | 2.7, 2.0, 1.7 mm | **12, 13, 12** | **0, 0, 0** | 0, 0, 0 |
+
+The midpoint column is the change, and the rest of the row is the point: the
+soft spring's cost is command tracking, ~0.1 s of lag on a free-space close, and
+it buys a 170x reduction in midpoint wander without costing a pick, a level, or
+a millimetre of placement. That lag is real and a bench grip cannot see it —
+this table is what says it does not matter in practice.
+
 
 ### The camera *is* the rig's camera
 

@@ -227,12 +227,55 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
 # The jaw drive
 # --------------------------------------------------------------------------
 #
-# The jaws are a **constant-force closer**: a soft spring commanded shut, with
-# the force cap doing the gripping. The host closes past contact (S=255 is a
-# negative span), so the drive's position error is always large and the force
-# is always the cap -- ``FINGER_EFFORT_N`` *is* the grip force, whatever the
-# object's width. That is also the better model of the real servo, which
-# stalls against the object and holds.
+# The jaws are a **soft spring, deliberately kept off its force cap**. The host
+# closes past contact (S=255 is a negative span), so the drive's position error
+# against a gripped object is whatever half-opening that object leaves -- 10 mm
+# for a 20 mm cube -- and the grip force is ``k`` times that.
+#
+# It used to be the other way round: k was 1000 N/m, the cap was 1.5 N, and the
+# cap *was* the grip force whatever the object's width. That is the tidier model
+# of a servo stalling against its load, and it has one consequence that is not
+# tidy at all. **A saturated pair of jaws cannot hold its own midpoint.** Two
+# position drives to a common target restore the midpoint with -2*k*mid; clipped
+# to the same cap in opposite directions they sum to nothing -- measured at
+# 0.001 N, against 1.5 N on each side. The pair is then a free 0.6 kg mass with
+# no spring and no damper, and it keeps whatever sideways velocity a move onset
+# hands it until a blade reaches a stop. ``check_jaw_midpoint_fixed`` is the
+# assertion; a place-down walks it 9 mm at a dead-constant 11 mm/s, away from
+# the base on 8 of 9 places in a run.
+#
+# Off the cap the same drives hold it, and the grip force is unchanged because
+# it was sized from the task and k is now derived from it:
+#
+#     drive                       midpoint range   grip force   command lag
+#     k 1000, cap 1.5 N (was)        12.8 mm         1.50 N        1.5 mm
+#     k 150,  cap 6.0 N (this)        0.5 mm         1.46 N        5.9 mm
+#
+# **The cost is command tracking, and it is not tunable away.** A position drive
+# following a ramp lags by c*rate/k, so the softness that buys the midpoint its
+# spring is the softness that makes the jaws trail a commanded sweep -- about
+# 0.1 s late on a free-space close. Damping trades the two directly: c=15 gives
+# 0.36 mm of midpoint against 10.0 mm of lag, c=2.25 gives 0.87 against 5.5.
+#
+# What this is *not* is the best of several workable options. The midpoint is a
+# coordinate the real gripper does not have, and the honest fix is to delete it
+# with a solved constraint rather than to hold it with a stiffer spring. Three
+# were measured and none reaches a reduced-coordinate articulation here:
+#
+#   * ``PhysxMimicJointAPI`` -- applied and ignored.
+#   * ``PhysxPhysicsRackAndPinionJoint`` -- exact on free rigid bodies (0.000 mm
+#     mirror error on an undriven rack) and inert on articulation DOFs. It looks
+#     like it works at a high ratio, because a gear reflects its pinion's inertia
+#     to the rack as I*ratio^2 and a 4 mm pinion at ratio 1e4 lands 2.7 kg on a
+#     0.30 kg armature -- the jaws are not held together, they are too heavy to
+#     move apart. Hold the ratio and drop the inertia to 1e-10 and the coupling
+#     vanishes completely: a constraint does not care what the pinion weighs.
+#     At ratio 1e5 the reflected 267 kg stops the jaws closing on a cube at all.
+#   * the fixed tendon -- a force the step integrates, not a constraint, and
+#     there is no band where it helps. Under the drive cap it cannot resist a
+#     1.5 N contact push (k=20 and k=65 are indistinguishable from no tendon);
+#     over it, a one-sided stop rectifies it into the gap (k=600 puts 9.8 N
+#     through the grip). k=200 is worse than nothing on both counts.
 #
 # The force is sized from the task, not from "as hard as the solver allows".
 # A 20 mm cube is 8 g, so its weight is 0.078 N and:
@@ -299,10 +342,22 @@ def finger_positions_for_s(s: float) -> tuple[float, float]:
 # costs up to nine missed picks a run, because the coupling's give is what
 # catches a cube the vision stack mislocated. The drive's damping costs nothing,
 # because it was simply mis-derived.
-FINGER_STIFFNESS_N_PER_M = 1000.0
-FINGER_EFFORT_N = 1.5
-# zeta = 0.42 at m = 0.32 kg (critical = 35.8); capped by the F/c speed floor.
-FINGER_DAMPING_N_S_PER_M = 15.0
+# Sized from the task above; the spring delivers it now, not the cap. Half the
+# clear opening a 20 mm cube leaves each jaw with the host commanding fully shut
+# is 10 mm, and 1.5 N over 10 mm is 150 N/m.
+FINGER_GRIP_FORCE_N = 1.5
+FINGER_GRIP_ERROR_M = 0.010
+FINGER_STIFFNESS_N_PER_M = FINGER_GRIP_FORCE_N / FINGER_GRIP_ERROR_M
+# The cap bounds a transient instead of setting the grip, so it has to stay
+# clear of the most the spring can ever ask for -- k over the full travel,
+# 150 * 0.024535 = 3.68 N. 6.0 leaves 1.6x. A drive that clips is a drive whose
+# midpoint restoring force is zero, which is the whole point of the change.
+FINGER_EFFORT_N = 6.0
+# The midpoint/tracking knee from the table above. zeta = 0.29 at m = 0.32 kg
+# (critical = 13.9). The old F/c speed floor no longer binds, because the drive
+# no longer saturates: its closing speed is k*x/c, 0.25 m/s at the open stop
+# against the 0.096 m/s the firmware sweeps at.
+FINGER_DAMPING_N_S_PER_M = 4.0
 
 # Armature: extra inertia in *joint* space, and the thing that makes the above
 # usable at 60 Hz.
@@ -501,6 +556,8 @@ __all__ = [
     "FINGER_DAMPING_N_S_PER_M",
     "FINGER_DYNAMIC_FRICTION",
     "FINGER_EFFORT_N",
+    "FINGER_GRIP_ERROR_M",
+    "FINGER_GRIP_FORCE_N",
     "FINGER_JOINT_NAMES",
     "FINGER_MAX_SPEED_M_S",
     "FINGER_STATIC_FRICTION",
