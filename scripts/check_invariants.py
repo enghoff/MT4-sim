@@ -203,9 +203,9 @@ def check_jaw_midpoint_fixed(rows: list[dict]) -> bool:
     a pick aims at a *detected* cube position, 5.4 mm off on average, so one
     blade reaches the cube before the other and the pair yields while closing
     on it. That give is the thing that captures an off-centre cube instead of
-    squeezing it out sideways -- README argues for it at length -- and it is
-    over as soon as the cube is off the desk. Measured on marker 3, the same
-    pick under both drives:
+    squeezing it out sideways -- docs/gripper.md argues for it at length --
+    and it is over as soon as the cube is off the desk. Measured on marker 3,
+    the same pick under both drives:
 
         drive                peak mid   back inside 1 mm after
         k=150 soft spring     3.32 mm          0.15 s

@@ -344,6 +344,13 @@ def render_preview(world: World) -> None:
 
     Kept above the work surface and out past its front corner: the wall sits
     just behind the arm, so anything looking from behind sees the back of it.
+
+    The aim is 100 mm up rather than at the table, which is what puts the whole
+    arm in the shot. Parked, the elbow is the highest thing on the machine at
+    ~264 mm, and it sits at pitch -5.7 deg from this eye; aiming at the desk
+    put the frame's top edge at -8.4 deg and cropped it. Raising only the target
+    tilts about a fixed eye, so the near cubes stay in: the frame spans -2.1 to
+    -38.1 deg, and the closest cube is the one that bounds how far this can go.
     """
     from mt4_sim.scene import define_camera
     from mt4_sim.chain import DESK_Z_MM as desk
@@ -352,7 +359,7 @@ def render_preview(world: World) -> None:
         world.stage,
         "/World/PreviewCamera",
         eye_mm=(610.0, -470.0, desk + 340.0),
-        target_mm=(130.0, -10.0, desk + 10.0),
+        target_mm=(130.0, -10.0, desk + 100.0),
         resolution=(1600, 1000),
         fov_deg=55.0,
     )

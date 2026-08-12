@@ -1,2 +1,5 @@
 # The working tree is LF; keep it that way despite a global core.autocrlf=true.
 * text=auto eol=lf
+
+# The README's images. text=auto would detect these anyway; say so outright.
+*.png binary
