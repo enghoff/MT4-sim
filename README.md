@@ -8,6 +8,10 @@ cubes — without knowing anything changed.
 
 ![the rig](docs/images/preview.png)
 
+**▶ [Watch it build a nine-cube tower](https://youtu.be/blgW6DqFtvQ)** — a
+`stack_cubes.py` run from the control repo, driving this scene, seen through the
+live vision stack's own annotated view.
+
 ## Why
 
 Testing robot code on real hardware is slow, and a mistake costs you a servo. The
@@ -49,7 +53,8 @@ drawn on top. This frame was rendered, not photographed.*
   rig's real calibration to **1.6–7.1 mm**; cubes read back to 5.6 mm mean.
 - The control repo's `pick`/`place` primitives, its task scripts and its MCP
   tools all run against the sim unmodified, and `stack_cubes.py` builds
-  eight-high cube columns with no missed picks.
+  nine-high cube columns: 9 of 9 picks first time, worst lean 3.8 mm, read off
+  the cube poses on the stage rather than off what the script claims.
 - The gripper closes on a misaligned cube and **shoves it square** — 20° off
   square comes out 0.1–0.3° off the jaws — instead of jamming on its corners.
 
